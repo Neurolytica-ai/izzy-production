@@ -31,11 +31,35 @@ npm run smoke           # boots the app and checks the endpoints
 npm run migrate         # apply migrations to DATABASE_URL
 npm run seed:extract    # prototype HTML -> db/seed/seed.json
 npm run seed:load       # load it into the database
-npm run dev             # http://localhost:3000/api/health
 ```
 
 `npm run schema:verify` and `npm run smoke` need no database and no credentials.
-Both are green as of the last commit — run them before every push.
+
+## Running it in development
+
+Two processes, two terminals:
+
+```bash
+npm run dev        # API on :3000
+npm run web:dev    # front end on :5173
+```
+
+Then open **http://localhost:5173** — not :3000. The API serves no HTML in
+development; Vite serves the app and proxies `/api` through to :3000.
+
+The proxy is deliberate rather than using CORS: it keeps the front end and the API
+on one origin, so the session cookie is first-party and cookie behaviour in
+development is identical to production behind Nginx. There is no CORS
+configuration to get wrong and no dev-only cookie exception.
+
+Create an account first if you have not:
+
+```bash
+npm run user:create -- --username admin --name "System Admin" --role admin
+```
+
+In production Nginx serves `public/` (built by `npm run web:build`) and proxies
+`/api` to the app container, so everything is on one origin there too.
 
 ## Scripts
 
@@ -129,21 +153,48 @@ document and the prototype disagree, the prototype wins.
 
 ## Front end
 
-Staying Vanilla JS for now, compiled with TypeScript rather than rewritten in a
-framework. Reasoning: every screen renders synchronously off one global `M`
-object, so replacing `loadAll()` with API calls leaves four of the seven screens
-essentially unchanged. The reporting grid's ergonomics (autocomplete, Enter/Tab
-traversal, draft row, save-on-blur) are the proven daily-use surface and the
-highest-regression thing to rewrite. WP §13.2 lists this as an open question and
-§3.2 leaves the choice to the developer.
+**React 19 + TypeScript, built with Vite.** WP §13.2 lists framework choice as an
+open question and §3.2 leaves it to the developer; the customer asked for React.
 
-Two things must change while wiring it up:
+The trade-off, recorded because it affects the schedule: rewriting the reporting
+grid's ergonomics (autocomplete, Enter/Tab cell traversal, the always-present
+draft row, save-on-blur) is the most expensive and highest-regression part of the
+project, and it is work that keeping the prototype's Vanilla JS would largely have
+avoided. Phases 3–5 absorb that cost.
 
-- **Escape output.** Every render builds `innerHTML` from unescaped data. Harmless
-  in a single-user local page, stored XSS the moment it is multi-user.
-- **Archive paging.** `loadAll()` pulls every report into memory and filters
-  client-side. WP §6.2 requires server-side paging performant at tens of
-  thousands of rows — roughly one year of real data at 54 employees.
+Two things React gives us that the prototype could not:
+
+- **Output is escaped by default.** Every prototype render concatenated unescaped
+  data into `innerHTML` — harmless in a single-user local page, stored XSS the
+  moment the data is shared between users.
+- **Server state is cached and invalidated deliberately** (React Query), which is
+  how WP §6.1's "two users entering rows for the same date do not overwrite each
+  other" gets satisfied: the server stays authoritative and writes invalidate
+  rather than the client trusting its own copy.
+
+Still outstanding regardless of framework:
+
+- **Archive paging.** WP §6.2 requires server-side paging performant at tens of
+  thousands of rows — roughly one year of real data at 54 employees. The
+  prototype loaded every report into memory and filtered client-side.
+
+### Layout
+
+```
+web/index.html          lang/dir are placeholders, set from /api/meta/config
+web/src/api/client.ts   the only place that talks to the server
+web/src/api/hooks.ts    React Query bindings; query keys and invalidation
+web/src/App.tsx         shell, nav, auth gate
+web/src/screens/        one file per tab
+web/src/components/     Modal, RecordForm, Toast
+web/src/styles.css      extracted verbatim from the prototype (RTL-tuned)
+```
+
+No router: seven fixed tabs need deep-linking and survive-a-refresh, which is
+`useHashTab` in about fifteen lines. `react-router` was installed and then removed
+— it currently ships a high-severity CSRF advisory that, while not exploitable in
+a plain SPA, is not worth explaining to the client's security scanner. `npm audit`
+reports zero vulnerabilities.
 
 ## Deployment
 

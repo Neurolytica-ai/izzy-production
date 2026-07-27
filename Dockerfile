@@ -7,10 +7,11 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 
-COPY tsconfig.json ./
+COPY tsconfig.json vite.config.ts ./
 COPY src ./src
 COPY scripts ./scripts
-RUN npm run build
+COPY web ./web
+RUN npm run build && npm run web:build
 
 # ---- runtime --------------------------------------------------------------
 FROM node:22.14-alpine AS runtime
@@ -22,6 +23,11 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 COPY --from=build /app/dist ./dist
+
+# Compiled front end. Nginx mounts ./public from the host in the Compose setup,
+# so this copy is what makes the image self-contained if it is ever run without
+# that bind mount.
+COPY --from=build /app/public ./public
 
 # Migrations, post-seed DDL and the extracted seed data ship with the image so a
 # deploy can run `npm run migrate` against Supabase without a checkout.

@@ -19,9 +19,14 @@
     "verify:api": "tsx scripts/verify-api.ts",
     "user:create": "tsx scripts/create-user.ts",
     "seed:extract": "tsx scripts/extract-seed.ts",
-    "seed:load": "tsx scripts/load-seed.ts"
+    "seed:load": "tsx scripts/load-seed.ts",
+    "css:extract": "tsx scripts/extract-css.ts",
+    "web:dev": "vite",
+    "web:build": "vite build",
+    "typecheck:web": "tsc -p web/tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.101.4",
     "bcryptjs": "^3.0.2",
     "cookie-parser": "^1.4.7",
     "dotenv": "^16.4.7",
@@ -29,6 +34,8 @@
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
     "pg": "^8.14.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "zod": "^3.24.2"
   },
   "devDependencies": {
@@ -38,7 +45,11 @@
     "@types/jsonwebtoken": "^9.0.9",
     "@types/node": "^22.13.14",
     "@types/pg": "^8.11.11",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^4.7.0",
     "tsx": "^4.19.3",
-    "typescript": "^5.8.2"
+    "typescript": "^5.8.2",
+    "vite": "^6.4.3"
   }
 }
