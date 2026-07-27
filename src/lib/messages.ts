@@ -256,6 +256,9 @@ export const ENTITY = {
   standard: 'standard',
   repair: 'repair',
   user: 'user',
+  report: 'report',
+  attendance: 'attendance',
+  day: 'day',
 } as const;
 
 export type EntityCode = (typeof ENTITY)[keyof typeof ENTITY];
@@ -267,6 +270,9 @@ const ENTITY_LABELS: Record<EntityCode, Entry> = {
   standard: { en: 'Standard hours', he: 'שעות תקן' },
   repair: { en: 'Repair', he: 'תיקון' },
   user: { en: 'User', he: 'משתמש' },
+  report: { en: 'Hours report', he: 'דיווח שעות' },
+  attendance: { en: 'Attendance', he: 'נוכחות' },
+  day: { en: 'Reporting day', he: 'יום דיווח' },
 };
 
 /** Falls back to the raw code for anything written by an older version. */

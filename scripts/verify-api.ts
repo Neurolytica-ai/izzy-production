@@ -121,6 +121,8 @@ async function main() {
   const cleanup = async () => {
     // Order matters: reports reference employees and projects.
     await db.query(`DELETE FROM reports WHERE emp_num >= $1 OR proj_num >= $1`, [TEST_EMP_BASE]);
+    await db.query(`DELETE FROM attendance WHERE emp_num >= $1`, [TEST_EMP_BASE]);
+    await db.query(`DELETE FROM submitted_days WHERE date IN ('2026-07-22','2026-07-23')`);
     await db.query(`DELETE FROM activity_log WHERE user_id IN (SELECT id FROM users WHERE username LIKE $1)`, [`${TEST_PREFIX}%`]);
     await db.query(`DELETE FROM users WHERE username LIKE $1`, [`${TEST_PREFIX}%`]);
     await db.query(`DELETE FROM employees WHERE num >= $1`, [TEST_EMP_BASE]);
@@ -454,6 +456,195 @@ async function main() {
       (await admin.put(`/api/users/${newUser.json.data.id}/password`, { password: 'yet-another-password' })).status,
       204
     );
+
+    // ---- reports (WP §7.3) -----------------------------------------------
+    console.log('\nWP §7.3 — reports:');
+    // A fresh employee with the 8.5h internal default, and a project to book to.
+    await manager.post('/api/employees', {
+      num: TEST_EMP_BASE + 5,
+      name: 'Grid Test Employee',
+      nick: 'gridtest',
+    });
+
+    const mk = (over: Record<string, unknown> = {}) => ({
+      date: '2026-07-22',
+      emp: 'gridtest',
+      proj: 'testproj',
+      dept: TEST_DEPT,
+      hours: 4,
+      ...over,
+    });
+
+    const madeReport = await reporter.post('/api/reports', mk());
+    check('reporter can create a report -> 201', madeReport.status, 201);
+    check('  employee resolved server-side from the nickname', madeReport.json.data.emp_num, TEST_EMP_BASE + 5);
+    check('  project resolved server-side', madeReport.json.data.proj_num, TEST_PROJ);
+    check('  department code resolved', madeReport.json.data.dept_num, 9999);
+    check('  bucket resolved', madeReport.json.data.bucket, 'ritum');
+    check('  target from WP §5.1', Number(madeReport.json.data.effective_target), 8.5);
+    checkTrue('  attributed to its creator', typeof madeReport.json.data.created_by_name === 'string');
+    const reportId = madeReport.json.data.id as number;
+
+    const unresolvable = await reporter.post('/api/reports', mk({ emp: 'no-such-nick' }));
+    check('an unresolvable employee is refused -> 400', unresolvable.status, 400);
+    check('  with the unresolved code', unresolvable.json.error, 'unresolved');
+    check('  naming the offending field', unresolvable.json.details.unresolved, ['emp']);
+
+    const noTarget = await reporter.post('/api/reports', mk({ proj: null, fix: null }));
+    check('neither project nor repair -> 400', noTarget.status, 400);
+    check('  with a specific code', noTarget.json.error, 'project_or_repair_required');
+
+    check('zero hours -> 400', (await reporter.post('/api/reports', mk({ hours: 0 }))).status, 400);
+    check('negative hours -> 400', (await reporter.post('/api/reports', mk({ hours: -3 }))).status, 400);
+    check(
+      'a bad date format -> 400',
+      (await reporter.post('/api/reports', mk({ date: '22/07/2026' }))).status,
+      400
+    );
+
+    // Over-target: the prototype's confirm dialog, as an API contract.
+    console.log('\nOver-target confirmation (prototype behaviour, absent from the WP):');
+    const overTarget = await reporter.post('/api/reports', mk({ hours: 6 })); // 4 + 6 > 8.5
+    check('exceeding the daily target -> 409', overTarget.status, 409);
+    check('  with the over_target code', overTarget.json.error, 'over_target');
+    check('  reporting the resulting total', Number(overTarget.json.details.newTotal), 10);
+    check('  and the target it exceeds', Number(overTarget.json.details.target), 8.5);
+    const notWritten = await db.query<{ n: number }>(
+      'SELECT count(*)::int AS n FROM reports WHERE emp_num = $1',
+      [TEST_EMP_BASE + 5]
+    );
+    check('  nothing was written', notWritten.rows[0]!.n, 1);
+
+    const acknowledged = await reporter.post(
+      '/api/reports',
+      mk({ hours: 6, acknowledgeOverTarget: true })
+    );
+    check('retrying with acknowledgement succeeds -> 201', acknowledged.status, 201);
+    const ackId = acknowledged.json.data.id as number;
+
+    // Editing a day that is already over target must not re-prompt.
+    const editWhileOver = await reporter.put(`/api/reports/${ackId}`, { hours: 7 });
+    check('editing a day already over target does not re-prompt -> 200', editWhileOver.status, 200);
+    await reporter.put(`/api/reports/${ackId}`, { hours: 6 });
+
+    // ---- listing, filtering, paging (WP §6.2) -----------------------------
+    console.log('\nWP §6.2 — listing, filtering and paging:');
+    const listed = await reporter.get('/api/reports?date=2026-07-22');
+    check('filter by date -> 200', listed.status, 200);
+    check('  returns both rows', listed.json.meta.totalRows, 2);
+    check('  totals cover the filtered set, not the page', Number(listed.json.meta.totalHours), 10);
+
+    const paged = await reporter.get('/api/reports?date=2026-07-22&limit=1&offset=0');
+    check('limit applies to the page', paged.json.data.length, 1);
+    check('  but totalRows still counts the whole match', paged.json.meta.totalRows, 2);
+    check('  hasMore is set', paged.json.meta.hasMore, true);
+
+    const lastPage = await reporter.get('/api/reports?date=2026-07-22&limit=1&offset=1');
+    check('the final page reports hasMore=false', lastPage.json.meta.hasMore, false);
+
+    const byEmp = await reporter.get(`/api/reports?emp=${TEST_EMP_BASE + 5}`);
+    check('filter by employee', byEmp.json.meta.totalRows, 2);
+    const textSearch = await reporter.get('/api/reports?q=gridtest');
+    checkTrue('free-text search matches the employee nickname', textSearch.json.meta.totalRows >= 2);
+    const searchWildcard = await reporter.get('/api/reports?q=%25');
+    check('a literal % in search is not a wildcard', searchWildcard.json.meta.totalRows, 0);
+    check(
+      'an unknown sort column is rejected -> 400',
+      (await reporter.get('/api/reports?sort=hours;DROP TABLE reports')).status,
+      400
+    );
+
+    // ---- repair rows ------------------------------------------------------
+    console.log('\nRepair rows:');
+    const repairRow = await reporter.post(
+      '/api/reports',
+      mk({ date: '2026-07-23', proj: null, fix: 16989, hours: 3 })
+    );
+    check('a repair row is accepted -> 201', repairRow.status, 201);
+    check('  project number is null', repairRow.json.data.proj_num, null);
+    checkTrue(
+      '  display name renders as the repair',
+      String(repairRow.json.data.display_proj_name).startsWith('תיקון 16989'),
+      String(repairRow.json.data.display_proj_name)
+    );
+    await reporter.del(`/api/reports/${repairRow.json.data.id}`);
+
+    // ---- submit day (WP §7.3) --------------------------------------------
+    console.log('\nSubmit day:');
+    const submitted = await reporter.post('/api/reports/submit-day', { date: '2026-07-22' });
+    check('submitting a day with rows -> 200', submitted.status, 200);
+    check('  records how many rows it covered', submitted.json.data.row_count, 2);
+    check(
+      'submitting an empty day -> 409',
+      (await reporter.post('/api/reports/submit-day', { date: '2019-01-01' })).status,
+      409
+    );
+    const stillEditable = await reporter.put(`/api/reports/${reportId}`, { hours: 4.5 });
+    check('a submitted day is a marker, not a lock (still editable)', stillEditable.status, 200);
+    const markers = await reporter.get('/api/reports/submitted-days');
+    checkTrue(
+      'submitted days are listed with who submitted them',
+      markers.json.data.some((d: any) => d.date === '2026-07-22' && d.submitted_by_name),
+      JSON.stringify(markers.json.data?.[0])
+    );
+    check(
+      'clearing a marker is admin-only',
+      (await reporter.del('/api/reports/submitted-days/2026-07-22')).status,
+      403
+    );
+    check(
+      '  an admin can clear it -> 204',
+      (await admin.del('/api/reports/submitted-days/2026-07-22')).status,
+      204
+    );
+
+    // ---- attendance + coverage (WP §5.5/§5.6) ----------------------------
+    console.log('\nWP §5.5/§5.6 — attendance and coverage:');
+    check(
+      'a reporter cannot edit clock hours -> 403',
+      (await reporter.put('/api/attendance', {
+        date: '2026-07-22',
+        emp_num: TEST_EMP_BASE + 5,
+        hours: 9,
+      })).status,
+      403
+    );
+    const setClock = await manager.put('/api/attendance', {
+      date: '2026-07-22',
+      emp_num: TEST_EMP_BASE + 5,
+      hours: 12,
+    });
+    check('a manager can set clock hours -> 200', setClock.status, 200);
+
+    const coverage = await reporter.get('/api/coverage?date=2026-07-22');
+    check('GET /api/coverage -> 200', coverage.status, 200);
+    const row = coverage.json.data.find((r: any) => r.emp_num === TEST_EMP_BASE + 5);
+    checkTrue('  the test employee appears', Boolean(row), 'not found');
+    check('  reported hours match', Number(row.reported), 10.5);
+    check('  variance = clock - reported', Number(row.variance), 1.5);
+    check('  variance beyond 1h is flagged', row.flagged, true);
+    check('  status is complete (10.5 >= 8.5)', row.status, 'complete');
+
+    check(
+      'clearing clock hours -> 204',
+      (await manager.put('/api/attendance', {
+        date: '2026-07-22',
+        emp_num: TEST_EMP_BASE + 5,
+        hours: null,
+      })).status,
+      204
+    );
+    const cleared = await reporter.get('/api/coverage?date=2026-07-22');
+    const clearedRow = cleared.json.data.find((r: any) => r.emp_num === TEST_EMP_BASE + 5);
+    check('  variance becomes null with no clock entry', clearedRow.variance, null);
+    check('  and it is not flagged', clearedRow.flagged, false);
+
+    // ---- delete a report --------------------------------------------------
+    console.log('\nDeleting a report:');
+    check('DELETE /api/reports/:id -> 204', (await reporter.del(`/api/reports/${ackId}`)).status, 204);
+    check('  deleting it again -> 404', (await reporter.del(`/api/reports/${ackId}`)).status, 404);
+    const afterDelete = await reporter.get('/api/reports?date=2026-07-22');
+    check('  the remaining row is untouched', afterDelete.json.meta.totalRows, 1);
 
     // ---- logout -----------------------------------------------------------
     console.log('\nLogout:');
