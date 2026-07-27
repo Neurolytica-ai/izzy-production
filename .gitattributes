@@ -1,0 +1,9 @@
+# Normalize to LF in the repository. The app is built and deployed on Linux
+# (Docker/Nginx), so committing CRLF would be a problem the day someone adds a
+# shell script or an entrypoint.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.xlsx binary
+*.docx binary
