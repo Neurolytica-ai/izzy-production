@@ -1,0 +1,74 @@
+# WP §10.2 — app + Nginx reverse proxy. The database is NOT here: it lives on
+# Supabase (managed Postgres), reached via DATABASE_URL in .env.
+#
+#   docker compose up -d --build
+#
+# A developer who prefers self-hosting Postgres can uncomment the `db` service
+# at the bottom and point DATABASE_URL at it; nothing else changes, because the
+# schema is plain SQL.
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+    expose:
+      - '3000'
+    # Not published to the host: Nginx is the only way in.
+    networks:
+      - internal
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - '80:80'
+      # Uncomment once a domain exists and certificates have been issued.
+      # - '443:443'
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./public:/var/www/public:ro
+      # Certbot webroot + certificates, for when TLS is turned on.
+      - certbot-webroot:/var/www/certbot
+      - certbot-certs:/etc/letsencrypt:ro
+    networks:
+      - internal
+
+  # TLS is not configured yet — there is no domain for this deployment, and
+  # Let's Encrypt cannot issue a certificate for a bare IP address. Once a
+  # hostname points at the server, uncomment this and the 443 mapping above,
+  # then run:
+  #   docker compose run --rm certbot certonly --webroot -w /var/www/certbot -d <host>
+  #
+  # certbot:
+  #   image: certbot/certbot:latest
+  #   volumes:
+  #     - certbot-webroot:/var/www/certbot
+  #     - certbot-certs:/etc/letsencrypt
+  #   entrypoint: /bin/sh
+  #   command: -c 'trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done'
+
+  # Optional self-hosted Postgres instead of Supabase.
+  # db:
+  #   image: postgres:16-alpine
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  #     POSTGRES_DB: izy
+  #   volumes:
+  #     - pgdata:/var/lib/postgresql/data
+  #   networks:
+  #     - internal
+
+networks:
+  internal:
+
+volumes:
+  certbot-webroot:
+  certbot-certs:
+  # pgdata:

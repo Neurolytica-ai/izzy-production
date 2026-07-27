@@ -1,0 +1,22 @@
+node_modules/
+dist/
+
+# Secrets — WP §10.1. Never commit these.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local artifacts
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+coverage/
+.vscode/
+.idea/
+
+# Uploaded Excel files staged for import (Phase 3)
+uploads/
+tmp/
