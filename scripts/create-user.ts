@@ -4,6 +4,12 @@
  *   npm run user:create -- --username admin --name "מנהל מערכת" --role admin
  *   npm run user:create -- --username yigal --name "יגאל" --role manager --emp 221
  *   npm run user:create -- --username yigal --reset-password
+ *   npm run user:create -- --username yigal --rename-to admin --reset-password
+ *
+ * --rename-to changes the login name in place, so the account keeps its id and
+ * its activity-log history stays attributed to it. Creating a replacement account
+ * and deleting the old one would orphan that history (user_id is ON DELETE SET
+ * NULL, so the entries survive but stop naming anyone).
  *
  * The password is generated and printed once unless --password is given. There is
  * deliberately no seeded default account: a migration that ships admin/admin is
@@ -81,22 +87,52 @@ async function main() {
 
     const hash = await hashPassword(plain);
 
+    const renameTo = arg('rename-to')?.trim();
+    if (renameTo && !/^\S{3,80}$/.test(renameTo)) {
+      console.error('--rename-to must be 3-80 characters with no spaces.');
+      process.exit(1);
+    }
+
     if (existing.rowCount && existing.rowCount > 0) {
       const id = existing.rows[0]!.id;
-      if (!flag('reset-password') && !explicit) {
+      if (!flag('reset-password') && !explicit && !renameTo) {
         console.error(
           `User "${username}" already exists. Pass --reset-password to set a new password, ` +
-            `or use the API to change role/details.`
+            `--rename-to <name> to change the login name, or use the API to change role/details.`
         );
         process.exit(1);
       }
-      await client.query('UPDATE users SET password_hash = $2 WHERE id = $1', [id, hash]);
+
+      if (renameTo) {
+        const clash = await client.query('SELECT 1 FROM users WHERE lower(username) = lower($1) AND id <> $2', [renameTo, id]);
+        if (clash.rowCount && clash.rowCount > 0) {
+          console.error(`Cannot rename: "${renameTo}" is already taken.`);
+          process.exit(1);
+        }
+        await client.query('UPDATE users SET username = $2 WHERE id = $1', [id, renameTo]);
+        await client.query(
+          `INSERT INTO activity_log (user_id, action, detail, entity, entity_key)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [id, ACTION.userEdit, `${username} renamed to ${renameTo} · via CLI`, ENTITY.user, String(id)]
+        );
+        console.log(`\nRenamed "${username}" to "${renameTo}".`);
+      }
+
+      if (flag('reset-password') || explicit) {
+        await client.query('UPDATE users SET password_hash = $2 WHERE id = $1', [id, hash]);
+      } else {
+        // Rename only — nothing further to do, and no password to print.
+        console.log('Password unchanged.');
+        return;
+      }
+      // After a rename the old name is gone — log and report the new one.
+      const effectiveName = renameTo ?? username;
       await client.query(
         `INSERT INTO activity_log (user_id, action, detail, entity, entity_key)
          VALUES ($1, $2, $3, $4, $5)`,
-        [id, ACTION.passwordReset, `${username} · via CLI`, ENTITY.user, String(id)]
+        [id, ACTION.passwordReset, `${effectiveName} · via CLI`, ENTITY.user, String(id)]
       );
-      console.log(`\nPassword reset for "${username}".`);
+      console.log(`Password reset for "${effectiveName}".`);
     } else {
       const displayName = arg('name') ?? username;
       const inserted = await client.query<{ id: number }>(
