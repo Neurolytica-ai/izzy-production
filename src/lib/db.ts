@@ -17,6 +17,22 @@ import { config } from './config.ts';
 const NUMERIC_OID = 1700;
 pg.types.setTypeParser(NUMERIC_OID, (v) => (v === null ? null : Number(v)));
 
+/**
+ * int8/bigint also arrives as a string, for the same reason: int8 spans further
+ * than float64 can represent exactly. Every int8 in this schema is a
+ * sequence-generated surrogate key (users.id, reports.id, activity_log.id) plus
+ * the occasional count(*), so real values stay many orders of magnitude below
+ * Number.MAX_SAFE_INTEGER and parsing is safe.
+ *
+ * This is not cosmetic. Leaving it as a string caused every valid session to be
+ * rejected: the login handler signed a token with users.id, the string "3" went
+ * into the JWT, and the verifier's `typeof uid === 'number'` check failed. The
+ * type annotations claimed number throughout and the compiler could not see the
+ * lie, because a type parameter on a query is an assertion, not a guarantee.
+ */
+const INT8_OID = 20;
+pg.types.setTypeParser(INT8_OID, (v) => (v === null ? null : Number(v)));
+
 /** date (not timestamptz) as a plain YYYY-MM-DD string, never a JS Date. */
 const DATE_OID = 1082;
 pg.types.setTypeParser(DATE_OID, (v) => v);

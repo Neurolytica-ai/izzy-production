@@ -2,10 +2,15 @@
  * API error types and the Express error handler.
  *
  * WP §7: validation errors return 400 with a message, permission failures 403.
+ *
+ * Every response carries a stable `error` code as well as a human `message`. The
+ * code is the contract — clients and tests branch on it — while the message is
+ * translated text from lib/messages.ts and may change with UI_LANG.
  */
 import type { Request, Response, NextFunction } from 'express';
 import { ZodError } from 'zod';
 import { config } from './config.ts';
+import { t, type MessageKey } from './messages.ts';
 
 export class ApiError extends Error {
   constructor(
@@ -19,20 +24,33 @@ export class ApiError extends Error {
   }
 }
 
-export const badRequest = (msg: string, details?: unknown) =>
-  new ApiError(400, msg, 'bad_request', details);
-export const unauthorized = (msg = 'נדרשת התחברות') => new ApiError(401, msg, 'unauthorized');
-export const forbidden = (msg = 'אין הרשאה לפעולה זו') => new ApiError(403, msg, 'forbidden');
-export const notFound = (msg = 'הרשומה לא נמצאה') => new ApiError(404, msg, 'not_found');
-export const conflict = (msg: string) => new ApiError(409, msg, 'conflict');
+/** Builds an ApiError from a catalogue key so no route hardcodes user-facing text. */
+function fromKey(status: number, code: string, key: MessageKey, details?: unknown): ApiError {
+  return new ApiError(status, t(key), code, details);
+}
+
+export const badRequest = (key: MessageKey = 'error.badRequest', details?: unknown) =>
+  fromKey(400, 'bad_request', key, details);
+export const unauthorized = (key: MessageKey = 'auth.required') =>
+  fromKey(401, 'unauthorized', key);
+export const forbidden = (key: MessageKey = 'auth.forbidden') => fromKey(403, 'forbidden', key);
+export const notFound = (key: MessageKey = 'error.notFound') => fromKey(404, 'not_found', key);
+export const conflict = (key: MessageKey) => fromKey(409, 'conflict', key);
+
+/**
+ * Escape hatch for a message that is already translated text rather than a key —
+ * currently only the password-length message, which interpolates a number.
+ */
+export const badRequestText = (message: string, details?: unknown) =>
+  new ApiError(400, message, 'bad_request', details);
 
 /** Postgres error codes we can turn into something a user can act on. */
-const PG_MESSAGES: Record<string, { status: number; message: string }> = {
-  '23505': { status: 409, message: 'רשומה עם מספר זה כבר קיימת' }, // unique_violation
-  '23503': { status: 409, message: 'לא ניתן לבצע: קיימות רשומות המקושרות לרשומה זו' }, // fk_violation
-  '23514': { status: 400, message: 'הנתונים אינם עומדים בכללי המערכת' }, // check_violation
-  '23502': { status: 400, message: 'חסר שדה חובה' }, // not_null_violation
-  '22P02': { status: 400, message: 'פורמט נתונים שגוי' }, // invalid_text_representation
+const PG_MESSAGES: Record<string, { status: number; key: MessageKey; code: string }> = {
+  '23505': { status: 409, key: 'db.duplicate', code: 'duplicate_key' },
+  '23503': { status: 409, key: 'db.referenced', code: 'still_referenced' },
+  '23514': { status: 400, key: 'db.checkFailed', code: 'check_violation' },
+  '23502': { status: 400, key: 'db.missingRequired', code: 'missing_required' },
+  '22P02': { status: 400, key: 'db.badFormat', code: 'bad_format' },
 };
 
 function isPgError(err: unknown): err is { code: string; constraint?: string; detail?: string } {
@@ -51,10 +69,10 @@ function isHttpishError(err: unknown): err is { status: number; type?: string; m
   return typeof status === 'number' && status >= 400 && status < 500;
 }
 
-const BODY_MESSAGES: Record<string, string> = {
-  'entity.too.large': 'הקובץ או הבקשה גדולים מדי',
-  'entity.parse.failed': 'תוכן הבקשה אינו JSON תקין',
-  'encoding.unsupported': 'קידוד התוכן אינו נתמך',
+const BODY_KEYS: Record<string, MessageKey> = {
+  'entity.too.large': 'body.tooLarge',
+  'entity.parse.failed': 'body.notJson',
+  'encoding.unsupported': 'body.badEncoding',
 };
 
 export function errorHandler(err: unknown, req: Request, res: Response, _next: NextFunction): void {
@@ -64,7 +82,7 @@ export function errorHandler(err: unknown, req: Request, res: Response, _next: N
   if (err instanceof ZodError) {
     res.status(400).json({
       error: 'bad_request',
-      message: 'קלט לא תקין',
+      message: t('error.invalidInput'),
       details: err.issues.map((i) => ({ field: i.path.join('.'), message: i.message })),
     });
     return;
@@ -83,8 +101,8 @@ export function errorHandler(err: unknown, req: Request, res: Response, _next: N
     const mapped = PG_MESSAGES[err.code]!;
     console.error(`[api] ${req.method} ${req.originalUrl} pg:${err.code}`, err.detail ?? '');
     res.status(mapped.status).json({
-      error: 'database',
-      message: mapped.message,
+      error: mapped.code,
+      message: t(mapped.key),
       ...(config.isProduction ? {} : { pgCode: err.code, constraint: err.constraint }),
     });
     return;
@@ -93,9 +111,10 @@ export function errorHandler(err: unknown, req: Request, res: Response, _next: N
   if (isHttpishError(err)) {
     const e = err as { status?: number; statusCode?: number; type?: string; message: string };
     const status = e.status ?? e.statusCode!;
+    const key = e.type ? BODY_KEYS[e.type] : undefined;
     res.status(status).json({
       error: e.type ?? 'bad_request',
-      message: (e.type && BODY_MESSAGES[e.type]) ?? 'הבקשה אינה תקינה',
+      message: t(key ?? 'error.badRequest'),
       ...(config.isProduction ? {} : { detail: e.message }),
     });
     return;
@@ -104,7 +123,7 @@ export function errorHandler(err: unknown, req: Request, res: Response, _next: N
   console.error(`[api] ${req.method} ${req.originalUrl} unhandled:`, err);
   res.status(500).json({
     error: 'internal',
-    message: 'שגיאת מערכת. נסה שוב או פנה למנהל המערכת.',
+    message: t('error.internal'),
     ...(config.isProduction ? {} : { detail: err instanceof Error ? err.message : String(err) }),
   });
 }

@@ -69,11 +69,17 @@ async function main() {
     checkTrue('  body.database.error explains why', typeof readyBody.database.error === 'string' && readyBody.database.error.length > 0);
 
     console.log('\nError shape:');
+    // 401 rather than 404 is deliberate: requireAuth is mounted on /api, so an
+    // unauthenticated caller cannot enumerate which routes exist. An
+    // authenticated caller does get 404 — asserted in verify-api.ts.
     const missing = await fetch(`${base}/api/does-not-exist`);
-    check('unknown /api route -> 404', missing.status, 404);
+    check('unknown /api route while unauthenticated -> 401, not 404', missing.status, 401);
     const missingBody = (await missing.json()) as { error: string; message: string };
-    check('  body.error', missingBody.error, 'not_found');
-    checkTrue('  body.message is Hebrew user-facing text', /[֐-׿]/.test(missingBody.message));
+    check('  body.error', missingBody.error, 'unauthorized');
+    checkTrue(
+      '  body.message is human-readable text',
+      typeof missingBody.message === 'string' && missingBody.message.length > 0
+    );
 
     console.log('\nSecurity headers:');
     checkTrue('x-powered-by is not advertised', health.headers.get('x-powered-by') === null);
@@ -91,7 +97,10 @@ async function main() {
     check('a 2MB body -> 413, not 500', tooBig.status, 413);
     const tooBigBody = (await tooBig.json()) as { error: string; message: string };
     check('  body.error', tooBigBody.error, 'entity.too.large');
-    checkTrue('  body.message is Hebrew user-facing text', /[֐-׿]/.test(tooBigBody.message));
+    checkTrue(
+      '  body.message is human-readable text',
+      typeof tooBigBody.message === 'string' && tooBigBody.message.length > 0
+    );
 
     const badJson = await fetch(`${base}/api/health`, {
       method: 'POST',

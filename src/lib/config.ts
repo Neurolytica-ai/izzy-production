@@ -21,6 +21,12 @@ const schema = z.object({
     .min(32, 'SESSION_SECRET must be at least 32 characters. Generate one with: node -e "console.log(require(\'crypto\').randomBytes(48).toString(\'base64url\'))"'),
   SESSION_TTL_HOURS: z.coerce.number().positive().default(12),
   COOKIE_SECURE: bool.default(false),
+  /**
+   * Language for user-facing messages. Defaults to English for development;
+   * production at Izzy Yogev runs 'he'. Both translations always ship — see
+   * lib/messages.ts. Changing this needs a restart.
+   */
+  UI_LANG: z.enum(['en', 'he']).default('en'),
   CORS_ORIGINS: z
     .string()
     .default('')

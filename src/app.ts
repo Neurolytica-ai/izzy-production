@@ -7,7 +7,13 @@ import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import { config } from './lib/config.ts';
 import { errorHandler, notFound } from './lib/errors.ts';
+import { requireAuth } from './middleware/auth.ts';
 import { healthRouter } from './routes/health.ts';
+import { authRouter } from './routes/auth.ts';
+import { usersRouter } from './routes/users.ts';
+import { masterRouter } from './routes/master.ts';
+import { lookupRouter } from './routes/lookup.ts';
+import { metaRouter } from './routes/meta.ts';
 
 export function createApp() {
   const app = express();
@@ -47,11 +53,20 @@ export function createApp() {
     });
   }
 
+  // Public: health checks and login.
   app.use('/api', healthRouter);
+  app.use('/api/auth', authRouter);
 
-  // Phase 1 mounts auth + master data here; Phase 2 reports; Phase 3 import/export.
+  // Everything below requires a session. WP §8: permissions are enforced on the
+  // server for every endpoint, never by hiding a button.
+  app.use('/api/users', requireAuth, usersRouter);
+  app.use('/api/lookup', requireAuth, lookupRouter);
+  app.use('/api/meta', requireAuth, metaRouter);
+  app.use('/api', requireAuth, masterRouter);
 
-  app.use('/api', (_req, _res, next) => next(notFound('נתיב API לא קיים')));
+  // Phase 2 mounts reports/attendance/dashboard; Phase 3 import/export.
+
+  app.use('/api', (_req, _res, next) => next(notFound('error.apiRouteMissing')));
   app.use(errorHandler);
 
   return app;

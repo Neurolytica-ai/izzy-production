@@ -44,11 +44,55 @@ Both are green as of the last commit — run them before every push.
 | `dev` | API with reload |
 | `build` / `start` | Compile to `dist/`, run compiled output |
 | `typecheck` | `tsc --noEmit` |
-| `smoke` | Boots the app in-process, asserts health/readiness/error shapes |
-| `schema:verify` | Applies all migrations to PGlite, loads the seed, asserts the WP §5 business rules |
-| `migrate` | Applies `db/migrations/*.sql` once each (`-- --status` to list) |
+| `smoke` | Boots the app in-process against a deliberately unreachable database; asserts it degrades rather than crashes |
+| `schema:verify` | Applies all migrations to PGlite, loads the seed, asserts the WP §5 business rules. Destructive, but on a throwaway in-memory database |
+| `verify:live` | **Read-only** checks against `DATABASE_URL`. Safe against production; the post-deploy check |
+| `verify:api` | End-to-end auth/roles/CRUD/resolution tests. **Writes** — namespaced and self-cleaning, refuses `NODE_ENV=production` |
+| `migrate` | Applies `db/migrations/*.sql` once each (`--status` to list) |
 | `seed:extract` | Parses `const SEED` out of the prototype HTML into `db/seed/seed.json`, reporting every anomaly |
-| `seed:load` | Loads that seed file (`-- --master-only` to skip reports) |
+| `seed:load` | Loads that seed file (`--master-only` to skip reports) |
+| `user:create` | Creates an account and prints a generated password once |
+
+Run `verify:api`, `schema:verify` and `smoke` before every push. All four suites
+are green as of the last commit (81 / 42 / 41 / 17).
+
+Note: PowerShell swallows npm's `--` separator, so pass script flags directly:
+`npx tsx scripts/migrate.ts --status` rather than `npm run migrate -- --status`.
+
+## Language
+
+All user-facing text lives in `src/lib/messages.ts`, in **both English and
+Hebrew**, keyed by a stable code. `UI_LANG` in `.env` selects one.
+
+- Development runs `en`.
+- **Production must be set to `he` before go-live** — the end users are
+  Hebrew-speaking shop-floor staff, and the prototype they are replacing is
+  entirely Hebrew/RTL.
+
+Two rules keep the switch a one-liner rather than a rewrite:
+
+1. Every API response carries a machine-readable `error` code as well as the
+   translated `message`. Clients and tests branch on the code, never the text.
+2. Nothing user-facing is written as a literal anywhere else. If it is not in
+   `messages.ts`, it does not reach a user.
+
+`activity_log.action` and `.entity` store stable codes (`master.edit`,
+`employee`), not display text — the prototype wrote Hebrew strings straight into
+its log, which makes it unfilterable by action type and would leave a permanent
+mix of languages after any translation. `GET /api/meta/vocabulary` returns the
+labels for the active language so the client never hardcodes a translation table.
+
+## First account
+
+There is deliberately no seeded default account — a migration that ships
+`admin/admin` is the usual way an internal tool ends up publicly writable.
+
+```bash
+npm run user:create -- --username admin --name "System Admin" --role admin
+```
+
+The password is generated and printed once. Roles are `reporter`, `manager`,
+`admin` (WP §8).
 
 ## Layout
 
@@ -129,6 +173,25 @@ and is not optional: an untested backup is not a backup.
 
 ## Status
 
-Phase 0 (Foundations) — schema, migrations, seed pipeline, API skeleton, Compose
-and Nginx are done and verified locally. Outstanding: Supabase credentials, and a
-domain if HTTPS is wanted before launch.
+**Phase 0 — Foundations: done.** Schema, migrations, seed pipeline, API skeleton,
+Compose and Nginx. Applied and seeded to Supabase (PostgreSQL 17.6).
+
+**Phase 1 — Core & auth: API done.** Sessions with bcrypt + JWT-in-an-http-only
+cookie, three roles enforced server-side on every endpoint, master-data CRUD for
+all five resources, account management, and the WP §5.7 derived-field resolution
+with autocomplete. 81 API tests green.
+
+Phase 1's admin *screens* are deliberately deferred to the start of Phase 2, so
+the TypeScript front-end build is set up once rather than twice.
+
+Outstanding across the project:
+
+- **A domain**, if HTTPS is wanted before launch (Let's Encrypt cannot issue for
+  a bare IP). `COOKIE_SECURE` stays `false` until then.
+- **`UI_LANG=he`** before go-live.
+- **The 7 real Excel files** — Phase 3's hard blocker. WP §9.1's column mappings
+  do not match what the prototype actually parses, and the prototype is
+  authoritative.
+- **Rotate the Supabase database password** before go-live.
+- Nothing has touched `62.72.35.209`, and the shared root password in WP §10.1
+  should be rotated regardless.
