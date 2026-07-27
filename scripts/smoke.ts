@@ -9,7 +9,16 @@
  * behaviour that matters when Supabase blips.
  */
 import type { AddressInfo } from 'node:net';
-import { createApp } from '../src/app.ts';
+
+// Force an unreachable database BEFORE the app (and therefore config) is
+// imported, so this test is deterministic whether or not .env points at a live
+// Supabase project. The "database is actually reachable" checks live in
+// verify-live.ts instead.
+process.env.DATABASE_URL = 'postgresql://smoke:smoke@127.0.0.1:59999/unreachable';
+process.env.SESSION_SECRET ??= 'smoke-test-only-not-a-real-secret-00000';
+process.env.NODE_ENV = 'development';
+
+const { createApp } = await import('../src/app.ts');
 
 let passed = 0;
 let failed = 0;
