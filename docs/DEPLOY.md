@@ -60,11 +60,22 @@ Only if that works, continue.
 **1e. Disable root SSH login.** Back in the root session:
 
 ```bash
+# Set it in the main config...
 sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-systemctl restart ssh || systemctl restart sshd
+# ...and override any cloud-image drop-in. sshd is first-match-wins across the
+# Included *.conf files, and 00- sorts before the cloud-init one, so this wins.
+echo 'PermitRootLogin no' > /etc/ssh/sshd_config.d/00-disable-root.conf
+# Validate the config BEFORE restarting so a typo can't break sshd:
+sshd -t && (systemctl restart ssh || systemctl restart sshd)
+# Confirm the EFFECTIVE value (this reads all drop-ins, not just one file):
+sshd -T | grep -i permitrootlogin      # must print: permitrootlogin no
 ```
 
-**Expect:** `ssh root@62.72.35.209` is now refused; `ssh neurolytica@62.72.35.209` still works. From here on, work as `neurolytica` and prefix admin commands with `sudo`.
+**Expect:** `sshd -T` prints `permitrootlogin no`; `ssh root@62.72.35.209` is now
+refused; `ssh neurolytica@62.72.35.209` still works. If `sshd -T` still shows
+`yes`, some drop-in set it — `grep -ri permitrootlogin /etc/ssh/sshd_config.d/`
+and fix that file too. From here on, work as `neurolytica` and prefix admin
+commands with `sudo`.
 
 ---
 
@@ -90,13 +101,21 @@ docker compose version
 
 ## Step 3 — Get the code
 
+A fresh server image has no `git` and Docker's installer doesn't add it, so install it first:
+
+```bash
+sudo apt-get update && sudo apt-get install -y git
+```
+
+Then clone:
+
 ```bash
 cd ~
-git clone https://github.com/Neurolytica-ai/<repo>.git izzy-production
+git clone https://github.com/Neurolytica-ai/izzy-production.git izzy-production
 cd izzy-production
 ```
 
-For a private repo, when prompted for a password paste your **GitHub Personal Access Token** (not your account password).
+The repo is private, so the clone will prompt for credentials: enter your GitHub username, and for the password paste a **GitHub Personal Access Token** (not your account password). If it clones without prompting, it's public and you can ignore this.
 
 ---
 
