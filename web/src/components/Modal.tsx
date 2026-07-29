@@ -1,4 +1,5 @@
 import { useEffect, useRef, type ReactNode } from 'react';
+import { useT } from '../i18n/index.tsx';
 
 interface Props {
   title: ReactNode;
@@ -58,21 +59,22 @@ interface ConfirmProps {
 
 export function ConfirmDialog({
   message,
-  confirmLabel = 'Delete',
+  confirmLabel,
   onConfirm,
   onCancel,
   busy = false,
 }: ConfirmProps) {
+  const t = useT();
   return (
     <div className="confirm-ov" onMouseDown={(e) => e.target === e.currentTarget && onCancel()}>
       <div className="confirm-box" role="dialog" aria-modal="true">
         <div className="confirm-msg">{message}</div>
         <div className="confirm-btns">
           <button className="btn danger" onClick={onConfirm} disabled={busy}>
-            {busy ? 'Working…' : confirmLabel}
+            {busy ? t('common.working') : (confirmLabel ?? t('common.delete'))}
           </button>
           <button className="btn ghost" onClick={onCancel} disabled={busy}>
-            Cancel
+            {t('common.cancel')}
           </button>
         </div>
       </div>

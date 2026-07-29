@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { ApiError } from '../api/client.ts';
+import { useT } from '../i18n/index.tsx';
 
 export interface Field {
   key: string;
@@ -55,6 +56,7 @@ export function RecordForm({
   onCancel?: () => void;
   submitLabel: string;
 }) {
+  const t = useT();
   const isEdit = record !== null;
   const [values, setValues] = useState<Values>(() => initialValues(fields, record));
   const [busy, setBusy] = useState(false);
@@ -84,7 +86,7 @@ export function RecordForm({
       await onSubmit(payload);
       if (!isEdit) setValues(initialValues(fields, null));
     } catch (err) {
-      setError(err instanceof Error ? err : new Error('Save failed'));
+      setError(err instanceof Error ? err : new Error(t('common.saveFailed')));
     } finally {
       setBusy(false);
     }
@@ -112,8 +114,8 @@ export function RecordForm({
                 disabled={disabled}
                 style={{ width: '100%' }}
               >
-                <option value="1">Yes</option>
-                <option value="0">No</option>
+                <option value="1">{t('common.yes')}</option>
+                <option value="0">{t('common.no')}</option>
               </select>
             ) : f.type === 'select' ? (
               <select
@@ -122,7 +124,7 @@ export function RecordForm({
                 disabled={disabled}
                 style={{ width: '100%' }}
               >
-                <option value="">—</option>
+                <option value="">{t('form.selectNone')}</option>
                 {f.options?.map((o) => (
                   <option key={o.value} value={o.value}>
                     {o.label}
@@ -158,11 +160,11 @@ export function RecordForm({
 
       <div className="confirm-btns" style={{ marginTop: 14 }}>
         <button className="btn grn" type="submit" disabled={busy}>
-          {busy ? 'Saving…' : submitLabel}
+          {busy ? t('common.saving') : submitLabel}
         </button>
         {onCancel && (
           <button className="btn ghost" type="button" onClick={onCancel} disabled={busy}>
-            Cancel
+            {t('common.cancel')}
           </button>
         )}
       </div>

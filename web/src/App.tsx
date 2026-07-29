@@ -1,8 +1,9 @@
-import { useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { ApiError, api } from './api/client.ts';
-import { keys, useAppConfig, useMe } from './api/hooks.ts';
+import { keys, useMe } from './api/hooks.ts';
 import { useHashTab } from './useHashTab.ts';
+import { LangToggle, useT } from './i18n/index.tsx';
+import type { StringKey } from './i18n/strings.ts';
 import { ArchiveScreen } from './screens/ArchiveScreen.tsx';
 import { LoginScreen } from './screens/LoginScreen.tsx';
 import { MasterScreen } from './screens/MasterScreen.tsx';
@@ -12,39 +13,31 @@ import { ReportScreen } from './screens/ReportScreen.tsx';
 /**
  * The seven tabs from the prototype, in its order. Kept even where the screen is
  * not built yet, so the shape of the finished app is visible and the nav does not
- * shuffle around as screens land.
+ * shuffle around as screens land. Labels are translation keys — see i18n/strings.
  */
 const TABS = [
-  { id: 'report', label: '📋 Hours Reporting', phase: 2 },
-  { id: 'archive', label: '📚 Reports Archive', phase: 2 },
-  { id: 'coverage', label: '🟢 Attendance Cross-Check', phase: 4 },
-  { id: 'dash', label: '📊 Dashboard', phase: 4 },
-  { id: 'import', label: '⬆️ Excel Import', phase: 3 },
-  { id: 'master', label: '🗂️ Master Data', phase: 1 },
-  { id: 'log', label: '🧾 Activity Log', phase: 4 },
-] as const;
+  { id: 'report', labelKey: 'tab.report', phase: 2 },
+  { id: 'archive', labelKey: 'tab.archive', phase: 2 },
+  { id: 'coverage', labelKey: 'tab.coverage', phase: 4 },
+  { id: 'dash', labelKey: 'tab.dash', phase: 4 },
+  { id: 'import', labelKey: 'tab.import', phase: 3 },
+  { id: 'master', labelKey: 'tab.master', phase: 1 },
+  { id: 'log', labelKey: 'tab.log', phase: 4 },
+] as const satisfies readonly { id: string; labelKey: StringKey; phase: number }[];
 
 export type TabId = (typeof TABS)[number]['id'];
-const TAB_IDS = TABS.map((t) => t.id);
+const TAB_IDS = TABS.map((tab) => tab.id);
 
 export function App() {
-  const config = useAppConfig();
+  const t = useT();
   const me = useMe();
   const qc = useQueryClient();
   const [tab, setTab] = useHashTab<TabId>(TAB_IDS as readonly TabId[], 'master');
 
-  // Document language and direction come from the server so UI_LANG is the single
-  // source of truth, rather than being hardcoded in index.html as well.
-  useEffect(() => {
-    if (!config.data) return;
-    document.documentElement.lang = config.data.lang;
-    document.documentElement.dir = config.data.dir;
-  }, [config.data]);
-
   const authFailed = me.error instanceof ApiError && me.error.isAuthFailure;
 
   if (me.isLoading) {
-    return <div className="empty" style={{ paddingTop: 60 }}>Loading…</div>;
+    return <div className="empty" style={{ paddingTop: 60 }}>{t('common.loading')}</div>;
   }
 
   if (authFailed || !me.data) {
@@ -71,31 +64,34 @@ export function App() {
     }
   };
 
+  const current = TABS.find((tab_) => tab_.id === tab)!;
+
   return (
     <>
       <header>
         <div>
-          <h1>Izzy Yogev Technologies — Production Management &amp; Control</h1>
-          <div className="sub">Hours reporting · attendance cross-check · standard-hours control</div>
+          <h1>{t('app.title')}</h1>
+          <div className="sub">{t('app.subtitle')}</div>
         </div>
         <div style={{ marginInlineStart: 'auto', display: 'flex', alignItems: 'center', gap: 12 }}>
+          <LangToggle />
           <div style={{ fontSize: 12, color: '#fff' }}>
             👤 {user.display_name} <span style={{ opacity: 0.75 }}>({user.role})</span>
           </div>
           <button className="btn ghost sm" onClick={signOut}>
-            Sign out
+            {t('common.signOut')}
           </button>
         </div>
       </header>
 
       <nav>
-        {TABS.map((t) => (
+        {TABS.map((tab_) => (
           <button
-            key={t.id}
-            className={t.id === tab ? 'active' : ''}
-            onClick={() => setTab(t.id)}
+            key={tab_.id}
+            className={tab_.id === tab ? 'active' : ''}
+            onClick={() => setTab(tab_.id)}
           >
-            {t.label}
+            {t(tab_.labelKey)}
           </button>
         ))}
       </nav>
@@ -108,10 +104,7 @@ export function App() {
         ) : tab === 'master' ? (
           <MasterScreen role={user.role} />
         ) : (
-          <Placeholder
-            title={TABS.find((t) => t.id === tab)!.label}
-            phase={TABS.find((t) => t.id === tab)!.phase}
-          />
+          <Placeholder title={t(current.labelKey)} phase={current.phase} />
         )}
       </main>
     </>

@@ -206,8 +206,13 @@ export function AutocompleteCell<T>({
             style={{
               position: 'fixed',
               top: rect.bottom,
-              left: rect.left,
               minWidth: Math.max(rect.width, 260),
+              // Anchor to the cell's start edge in both directions: under RTL the
+              // list must hang off the input's right edge, not its left, or it
+              // drifts off toward the wrong side of the screen.
+              ...(document.documentElement.dir === 'rtl'
+                ? { right: window.innerWidth - rect.right }
+                : { left: rect.left }),
             }}
           >
             {matches.map((m, i) => (

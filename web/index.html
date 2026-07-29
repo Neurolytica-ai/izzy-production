@@ -1,15 +1,27 @@
 <!doctype html>
 <!--
-  lang and dir are placeholders. The real values come from GET /api/meta/config
-  and are applied by src/main.tsx before the app renders, so the document
-  direction always matches UI_LANG on the server rather than being hardcoded in
-  two places that can disagree.
+  lang/dir default to Hebrew (the end users' language). The inline script below
+  applies the user's saved choice (localStorage 'izy_lang', set by the header
+  language toggle) BEFORE first paint, so there is no direction flash while the
+  React app mounts. src/i18n keeps the document in sync from then on.
 -->
-<html lang="en" dir="ltr">
+<html lang="he" dir="rtl">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Izzy Yogev — Production Management &amp; Control</title>
+    <script>
+      (function () {
+        try {
+          var l = localStorage.getItem('izy_lang');
+          if (l !== 'en' && l !== 'he') l = 'he';
+          document.documentElement.lang = l;
+          document.documentElement.dir = l === 'he' ? 'rtl' : 'ltr';
+        } catch (e) {
+          /* storage blocked — keep the he/rtl default in the <html> tag */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

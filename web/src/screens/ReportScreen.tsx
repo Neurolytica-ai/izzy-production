@@ -13,6 +13,7 @@ import { useEmployees, useReportMutations, useReports, useSubmittedDays } from '
 import { AutocompleteCell, type AcSuggestion } from '../components/AutocompleteCell.tsx';
 import { ConfirmDialog } from '../components/Modal.tsx';
 import { useToast } from '../components/Toast.tsx';
+import { useT } from '../i18n/index.tsx';
 
 /**
  * WP §6, §7.3 — the Excel-style hours-entry grid, the system's most-used screen
@@ -123,7 +124,7 @@ const projSuggest = (q: string): Promise<AcSuggestion<Project>[]> =>
 
 const deptSuggest = (q: string): Promise<AcSuggestion<Department & { bucket_label: string | null }>[]> =>
   api.lookup.departments(q).then((rows) =>
-    rows.map((d) => ({ main: d.name, sub: d.num == null ? '—' : `dept ${d.num}`, value: d }))
+    rows.map((d) => ({ main: d.name, sub: d.num == null ? '—' : `${d.num}`, value: d }))
   );
 
 const fixSuggest = (q: string): Promise<AcSuggestion<Repair>[]> =>
@@ -134,6 +135,7 @@ const fixSuggest = (q: string): Promise<AcSuggestion<Repair>[]> =>
 /* --------------------------------------------------------------- the screen */
 
 export function ReportScreen() {
+  const t = useT();
   const toast = useToast();
   const [date, setDate] = useState(todayISO);
   const [showAll, setShowAll] = useState(false);
@@ -171,9 +173,9 @@ export function ReportScreen() {
     return (empNum: number | null): StatusColor | null => {
       if (empNum == null || showAll) return null;
       const h = byEmp.get(empNum) ?? 0;
-      const t = targetOf.get(empNum) ?? 0;
+      const tgt = targetOf.get(empNum) ?? 0;
       if (h <= 0) return 'r';
-      return h >= t - 0.001 ? 'g' : 'y';
+      return h >= tgt - 0.001 ? 'g' : 'y';
     };
   }, [rows, employees.data, showAll]);
 
@@ -217,7 +219,7 @@ export function ReportScreen() {
               .then(onDone)
               .catch((e) => {
                 onFail?.();
-                toast.show(e instanceof Error ? e.message : 'Save failed', 'error');
+                toast.show(e instanceof Error ? e.message : t('common.saveFailed'), 'error');
               });
           },
           onCancel: onFail,
@@ -229,20 +231,20 @@ export function ReportScreen() {
         toast.show(err.message, 'error');
         return;
       }
-      toast.show(err instanceof Error ? err.message : 'Save failed', 'error');
+      toast.show(err instanceof Error ? err.message : t('common.saveFailed'), 'error');
     }
   }
 
   const commitDraft = () => {
     const complete = draft.empText.trim() && (draft.projText.trim() || draft.fixText.trim()) && draft.hours.trim();
     if (!complete) {
-      toast.show('Employee, project or repair, and hours are required', 'error');
+      toast.show(t('report.required'), 'error');
       return;
     }
     void writeWithOverTarget(
       (ack) => mut.create.mutateAsync({ ...toInput(draft), acknowledgeOverTarget: ack }),
       () => {
-        toast.show('Added');
+        toast.show(t('common.added'));
         setDraft(emptyDraft(draft.date));
         // Return focus to the top of the fresh draft row.
         setTimeout(() => {
@@ -258,20 +260,20 @@ export function ReportScreen() {
     if (m.id == null) return;
     void writeWithOverTarget(
       (ack) => mut.update.mutateAsync({ id: m.id!, ...toInput(m), acknowledgeOverTarget: ack }),
-      () => toast.show('Saved'),
+      () => toast.show(t('common.saved')),
       onError
     );
   };
 
   const submitDay = () => {
     if (rows.length === 0) {
-      toast.show('Nothing to submit for this date', 'error');
+      toast.show(t('report.nothingToSubmit'), 'error');
       return;
     }
     void mut.submitDay
       .mutateAsync(date)
-      .then((r) => toast.show(`Day submitted — ${r.row_count} rows`))
-      .catch((e) => toast.show(e instanceof Error ? e.message : 'Submit failed', 'error'));
+      .then((r) => toast.show(t('report.daySubmitted', { n: r.row_count })))
+      .catch((e) => toast.show(e instanceof Error ? e.message : t('report.submitFailed'), 'error'));
   };
 
   return (
@@ -279,7 +281,7 @@ export function ReportScreen() {
       <div className="card">
         <div className="toolbar" style={{ marginBottom: 10 }}>
           <label>
-            Date{' '}
+            {t('report.th.date')}{' '}
             <input
               type="date"
               value={date}
@@ -292,52 +294,52 @@ export function ReportScreen() {
             className={`btn sm ${showAll ? '' : 'ghost'}`}
             onClick={() => setShowAll((v) => !v)}
           >
-            {showAll ? '📅 Show one day' : '🗂 All dates'}
+            {showAll ? t('report.showOneDay') : t('report.allDates')}
           </button>
           <div style={{ flex: 1 }} />
           {!showAll && (
             <button className="btn sm grn" onClick={submitDay} disabled={mut.submitDay.isPending}>
-              ✓ Submit day to archive
+              {t('report.submitDay')}
             </button>
           )}
         </div>
 
         <div className="mini" style={{ marginBottom: 8 }}>
           {showAll ? (
-            <b>{reports.data?.meta.totalRows ?? rows.length} rows across all dates</b>
+            <b>{t('report.rowsAllDates', { n: reports.data?.meta.totalRows ?? rows.length })}</b>
           ) : (
             <>
               <span className="dot g" />
-              {dayStatus.g} complete &nbsp;
+              {dayStatus.g} {t('report.complete')} &nbsp;
               <span className="dot y" />
-              {dayStatus.y} partial &nbsp;
+              {dayStatus.y} {t('report.partial')} &nbsp;
               <span className="dot r" />
-              {dayStatus.r} not reported
-              {isSubmitted && <span className="badge-new" style={{ marginInlineStart: 8 }}>✓ submitted</span>}
+              {dayStatus.r} {t('report.notReported')}
+              {isSubmitted && <span className="badge-new" style={{ marginInlineStart: 8 }}>{t('report.submitted')}</span>}
             </>
           )}
         </div>
 
         {reports.error ? (
           <div className="empty" style={{ color: '#c33' }}>
-            {reports.error instanceof Error ? reports.error.message : 'Failed to load'}
+            {reports.error instanceof Error ? reports.error.message : t('common.failedToLoad')}
           </div>
         ) : (
           <div className="xl-scroll">
             <table className="xl">
               <thead>
                 <tr>
-                  <th style={{ minWidth: 110 }}>Date</th>
-                  <th style={{ minWidth: 100 }}>Employee</th>
-                  <th style={{ minWidth: 130 }}>Project</th>
-                  <th style={{ minWidth: 80 }}>Hours</th>
-                  <th style={{ minWidth: 110 }}>Department</th>
-                  <th style={{ minWidth: 90 }}>Repair #</th>
-                  <th className="derived-h" style={{ minWidth: 80 }}>Proj #</th>
-                  <th className="derived-h" style={{ minWidth: 190 }}>Project name</th>
-                  <th className="derived-h" style={{ minWidth: 70 }}>Emp #</th>
-                  <th className="derived-h" style={{ minWidth: 70 }}>Dept #</th>
-                  <th className="derived-h" style={{ minWidth: 130 }}>Emp name</th>
+                  <th style={{ minWidth: 110 }}>{t('report.th.date')}</th>
+                  <th style={{ minWidth: 100 }}>{t('report.th.employee')}</th>
+                  <th style={{ minWidth: 130 }}>{t('report.th.project')}</th>
+                  <th style={{ minWidth: 80 }}>{t('report.th.hours')}</th>
+                  <th style={{ minWidth: 110 }}>{t('report.th.department')}</th>
+                  <th style={{ minWidth: 90 }}>{t('report.th.repairNo')}</th>
+                  <th className="derived-h" style={{ minWidth: 80 }}>{t('report.th.projNo')}</th>
+                  <th className="derived-h" style={{ minWidth: 190 }}>{t('report.th.projName')}</th>
+                  <th className="derived-h" style={{ minWidth: 70 }}>{t('report.th.empNo')}</th>
+                  <th className="derived-h" style={{ minWidth: 70 }}>{t('report.th.deptNo')}</th>
+                  <th className="derived-h" style={{ minWidth: 130 }}>{t('report.th.empName')}</th>
                   <th style={{ width: 34 }} />
                 </tr>
               </thead>
@@ -351,14 +353,14 @@ export function ReportScreen() {
                     onSave={saveExisting}
                     onDelete={(id) =>
                       setConfirm({
-                        message: `Delete this row? ${r.emp_nick} · ${Number(r.hours)}h · ${r.date}`,
+                        message: t('report.deleteRow', { emp: r.emp_nick, hours: Number(r.hours), date: r.date }),
                         onConfirm: () => {
                           setConfirm(null);
                           void mut.remove
                             .mutateAsync(id)
-                            .then(() => toast.show('Deleted'))
+                            .then(() => toast.show(t('common.deleted')))
                             .catch((e) =>
-                              toast.show(e instanceof Error ? e.message : 'Delete failed', 'error')
+                              toast.show(e instanceof Error ? e.message : t('common.deleteFailed'), 'error')
                             );
                         },
                       })
@@ -377,10 +379,10 @@ export function ReportScreen() {
                 )}
               </tbody>
             </table>
-            {reports.isLoading && <div className="empty">Loading…</div>}
+            {reports.isLoading && <div className="empty">{t('common.loading')}</div>}
             {!reports.isLoading && rows.length === 0 && !showAll && (
               <div className="mini" style={{ padding: '8px 4px' }}>
-                No rows for this date yet — start typing in the highlighted row.
+                {t('report.noRowsHint')}
               </div>
             )}
           </div>
@@ -390,7 +392,7 @@ export function ReportScreen() {
       {confirm && (
         <ConfirmDialog
           message={confirm.message}
-          confirmLabel="Confirm"
+          confirmLabel={t('common.confirm')}
           onConfirm={confirm.onConfirm}
           onCancel={() => {
             confirm.onCancel?.();
@@ -423,6 +425,7 @@ type RowProps =
     };
 
 function RowEditor(props: RowProps) {
+  const t = useT();
   const isDraft = props.mode === 'draft';
 
   // Existing rows keep a local editable copy, re-seeded when the server row
@@ -508,7 +511,7 @@ function RowEditor(props: RowProps) {
 
   const empMiss = model.unresolved.includes('emp');
   const projMiss = model.unresolved.includes('proj');
-  const projName = model.proj_name ?? (model.fix != null ? `Repair ${model.fix}` : '');
+  const projName = model.proj_name ?? (model.fix != null ? t('report.repairLabel', { n: model.fix }) : '');
   const status = props.statusOf(model.emp_num);
 
   return (
@@ -536,21 +539,21 @@ function RowEditor(props: RowProps) {
         value={model.empText}
         adornment={status ? <span className={`dot ${status}`} /> : null}
         search={empSuggest}
-        onType={(t) => update({ empText: t, emp_num: null, emp_name: '' })}
+        onType={(text) => update({ empText: text, emp_num: null, emp_name: '' })}
         onPick={(e) => update({ empText: e.nick, emp_num: e.num, emp_name: e.name, unresolved: model.unresolved.filter((u) => u !== 'emp') })}
         onEnterEnd={onEnterEnd}
         onBlur={() => {
           reconcile();
           saveIfExisting();
         }}
-        ariaLabel="Employee"
+        ariaLabel={t('aria.employee')}
       />
 
       {/* Project (autocomplete) */}
       <AutocompleteCell<Project>
         value={model.projText}
         search={projSuggest}
-        onType={(t) => update({ projText: t, proj_num: null, proj_name: null })}
+        onType={(text) => update({ projText: text, proj_num: null, proj_name: null })}
         onPick={(p) =>
           update({
             projText: p.nick,
@@ -564,7 +567,7 @@ function RowEditor(props: RowProps) {
           reconcile();
           saveIfExisting();
         }}
-        ariaLabel="Project"
+        ariaLabel={t('aria.project')}
       />
 
       {/* Hours */}
@@ -594,39 +597,39 @@ function RowEditor(props: RowProps) {
       <AutocompleteCell<Department & { bucket_label: string | null }>
         value={model.deptText}
         search={deptSuggest}
-        onType={(t) => update({ deptText: t, dept_num: null })}
+        onType={(text) => update({ deptText: text, dept_num: null })}
         onPick={(d) => update({ deptText: d.name, dept_num: d.num })}
         onEnterEnd={onEnterEnd}
         onBlur={() => {
           reconcile();
           saveIfExisting();
         }}
-        ariaLabel="Department"
+        ariaLabel={t('aria.department')}
       />
 
       {/* Repair (autocomplete) */}
       <AutocompleteCell<Repair>
         value={model.fixText}
         search={fixSuggest}
-        onType={(t) => update({ fixText: t, fix: null })}
+        onType={(text) => update({ fixText: text, fix: null })}
         onPick={(r) => update({ fixText: String(r.fix), fix: r.fix })}
         onEnterEnd={onEnterEnd}
         onBlur={() => {
           reconcile();
           saveIfExisting();
         }}
-        ariaLabel="Repair number"
+        ariaLabel={t('aria.repairNo')}
       />
 
       {/* Derived */}
       <td className={`derived ${projMiss ? 'miss' : ''}`}>
-        {model.proj_num ?? (projMiss ? 'not identified' : '')}
+        {model.proj_num ?? (projMiss ? t('report.notIdentified') : '')}
       </td>
       <td className="derived" title={projName}>
         {projName.length > 28 ? `${projName.slice(0, 28)}…` : projName}
       </td>
       <td className={`derived ${empMiss ? 'miss' : ''}`}>
-        {model.emp_num ?? (empMiss ? 'not identified' : '')}
+        {model.emp_num ?? (empMiss ? t('report.notIdentified') : '')}
       </td>
       <td className="derived">{model.dept_num ?? ''}</td>
       <td className="derived">{model.emp_name}</td>
@@ -636,7 +639,7 @@ function RowEditor(props: RowProps) {
         {!isDraft && (
           <button
             className="delx"
-            title="Delete"
+            title={t('common.delete')}
             onClick={() => (props as Extract<RowProps, { mode: 'existing' }>).onDelete(props.seed.id)}
           >
             🗑

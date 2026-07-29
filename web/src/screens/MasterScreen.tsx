@@ -26,6 +26,8 @@ import {
 import { ConfirmDialog, Modal } from '../components/Modal.tsx';
 import { RecordForm, type Field } from '../components/RecordForm.tsx';
 import { useToast } from '../components/Toast.tsx';
+import { useT } from '../i18n/index.tsx';
+import type { StringKey } from '../i18n/strings.ts';
 
 /**
  * WP §6.6 — Master Data.
@@ -49,7 +51,17 @@ interface Deleting {
   label: string;
 }
 
+/** Entity → its singular label key, for the Add/Edit modal titles. */
+const ENTITY_LABEL: Record<Entity, StringKey> = {
+  employees: 'entity.employee',
+  projects: 'entity.project',
+  departments: 'entity.department',
+  standard: 'entity.standardBox',
+  repairs: 'entity.repair',
+};
+
 export function MasterScreen({ role }: { role: Role }) {
+  const t = useT();
   const canWrite = role === 'manager' || role === 'admin';
   const toast = useToast();
 
@@ -92,52 +104,52 @@ export function MasterScreen({ role }: { role: Role }) {
 
   const FIELDS: Record<Entity, Field[]> = {
     employees: [
-      { key: 'num', label: 'Employee number', type: 'number', required: true, readOnlyOnEdit: true },
-      { key: 'name', label: 'Full name', required: true },
-      { key: 'nick', label: 'Nickname (typed in the grid)', required: true },
-      { key: 'contractor', label: 'Subcontractor', hint: 'Leave empty for internal staff' },
+      { key: 'num', label: t('field.emp.num'), type: 'number', required: true, readOnlyOnEdit: true },
+      { key: 'name', label: t('field.emp.name'), required: true },
+      { key: 'nick', label: t('field.emp.nick'), required: true },
+      { key: 'contractor', label: t('field.emp.contractor'), hint: t('field.emp.contractorHint') },
       {
         key: 'target_hours',
-        label: 'Daily target hours',
+        label: t('field.emp.target'),
         type: 'number',
-        hint: 'Leave empty for the default: 10.5 subcontractor / 8.5 internal',
+        hint: t('field.emp.targetHint'),
       },
-      { key: 'active', label: 'Currently employed', type: 'bool' },
+      { key: 'active', label: t('field.emp.active'), type: 'bool' },
     ],
     projects: [
-      { key: 'num', label: 'Project number', type: 'number', required: true, readOnlyOnEdit: true },
-      { key: 'name', label: 'Project name', required: true },
-      { key: 'nick', label: 'Nickname (typed in the grid)', required: true },
-      { key: 'client', label: 'Customer' },
-      { key: 'overhead', label: 'Overhead (non-productive)', type: 'bool' },
+      { key: 'num', label: t('field.proj.num'), type: 'number', required: true, readOnlyOnEdit: true },
+      { key: 'name', label: t('field.proj.name'), required: true },
+      { key: 'nick', label: t('field.proj.nick'), required: true },
+      { key: 'client', label: t('field.proj.client') },
+      { key: 'overhead', label: t('field.proj.overhead'), type: 'bool' },
     ],
     departments: [
-      { key: 'name', label: 'Department name', required: true },
-      { key: 'num', label: 'Department code', type: 'number' },
+      { key: 'name', label: t('field.dept.name'), required: true },
+      { key: 'num', label: t('field.dept.num'), type: 'number' },
       {
         key: 'bucket',
-        label: 'Standard-hours bucket',
+        label: t('field.dept.bucket'),
         type: 'select',
         options: bucketOptions,
-        hint: 'Leave empty for non-productive — excluded from standard comparison',
+        hint: t('field.dept.bucketHint'),
       },
     ],
     standard: [
-      { key: 'box', label: 'Box number', type: 'number', required: true, readOnlyOnEdit: true },
-      { key: 'name', label: 'Box description' },
+      { key: 'box', label: t('field.std.box'), type: 'number', required: true, readOnlyOnEdit: true },
+      { key: 'name', label: t('field.std.name') },
       {
         key: 'parent',
-        label: 'Parent project',
+        label: t('field.std.parent'),
         type: 'number',
-        hint: 'Not validated against projects — 43 existing values reference projects that do not exist',
+        hint: t('field.std.parentHint'),
       },
-      { key: 'total', label: 'Total standard hours', type: 'number' },
+      { key: 'total', label: t('field.std.total'), type: 'number' },
     ],
     repairs: [
-      { key: 'fix', label: 'Repair number', type: 'number', required: true, readOnlyOnEdit: true },
-      { key: 'client', label: 'Customer' },
-      { key: 'date', label: 'Entry date', type: 'date' },
-      { key: 'model', label: 'Truck model' },
+      { key: 'fix', label: t('field.rep.fix'), type: 'number', required: true, readOnlyOnEdit: true },
+      { key: 'client', label: t('field.rep.client') },
+      { key: 'date', label: t('field.rep.date'), type: 'date' },
+      { key: 'model', label: t('field.rep.model') },
     ],
   };
 
@@ -157,11 +169,11 @@ export function MasterScreen({ role }: { role: Role }) {
         ...values,
         [keyField]: key,
       });
-      toast.show('Saved');
+      toast.show(t('common.saved'));
       setEditing(null);
     } else {
       await (creators[entity].mutateAsync as (v: unknown) => Promise<unknown>)(values);
-      toast.show('Added');
+      toast.show(t('common.added'));
       setEditing(null);
     }
   };
@@ -172,13 +184,13 @@ export function MasterScreen({ role }: { role: Role }) {
       await (deleters[deleting.entity].mutateAsync as (k: unknown) => Promise<unknown>)(
         deleting.key
       );
-      toast.show('Deleted');
+      toast.show(t('common.deleted'));
       setDeleting(null);
     } catch (err) {
       // The common case is a 409: rows still reference this record. WP §4.10
       // blocks the delete rather than cascading history away, so the message the
       // server sends is the useful one.
-      toast.show(err instanceof Error ? err.message : 'Delete failed', 'error');
+      toast.show(err instanceof Error ? err.message : t('common.deleteFailed'), 'error');
       setDeleting(null);
     }
   };
@@ -189,12 +201,12 @@ export function MasterScreen({ role }: { role: Role }) {
         <button
           className="delm"
           style={{ color: '#2e5496' }}
-          title="Edit"
+          title={t('common.edit')}
           onClick={() => setEditing({ entity, record: record as Record<string, unknown> })}
         >
           ✏️
         </button>
-        <button className="delm" title="Delete" onClick={() => setDeleting({ entity, key, label })}>
+        <button className="delm" title={t('common.delete')} onClick={() => setDeleting({ entity, key, label })}>
           🗑
         </button>
       </>
@@ -207,37 +219,34 @@ export function MasterScreen({ role }: { role: Role }) {
   return (
     <>
       <div className="row">
-        <Kpi value={`${activeEmployees.length} / ${employees.data?.length ?? 0}`} label="Active employees" />
-        <Kpi value={productive.length} label="Productive projects" />
-        <Kpi value={clients.size} label="Customers" />
-        <Kpi value={standard.data?.length ?? 0} label="Standard-hours boxes" />
-        <Kpi value={repairs.data?.length ?? 0} label="Repair tickets" />
+        <Kpi value={`${activeEmployees.length} / ${employees.data?.length ?? 0}`} label={t('master.kpi.activeEmployees')} />
+        <Kpi value={productive.length} label={t('master.kpi.productiveProjects')} />
+        <Kpi value={clients.size} label={t('master.kpi.customers')} />
+        <Kpi value={standard.data?.length ?? 0} label={t('master.kpi.standardBoxes')} />
+        <Kpi value={repairs.data?.length ?? 0} label={t('master.kpi.repairTickets')} />
       </div>
 
       {!canWrite && (
         <div className="card">
-          <div className="mini">
-            Your role is <b>{role}</b>, which can view master data but not change it (WP §8). Editing
-            requires manager or admin.
-          </div>
+          <div className="mini">{t('master.roleNote', { role })}</div>
         </div>
       )}
 
       <Section
-        title="Employees"
+        title={t('master.section.employees')}
         count={employees.data?.length}
         query={employees}
         onAdd={canWrite ? () => setEditing({ entity: 'employees', record: null }) : undefined}
-        addLabel="Add employee"
+        addLabel={t('master.add.employee')}
       >
         <table className="xl" style={{ fontSize: 12.5, minWidth: 620 }}>
           <thead>
             <tr>
-              <th>Number</th>
-              <th style={{ textAlign: 'start' }}>Name</th>
-              <th>Nickname</th>
-              <th>Subcontractor</th>
-              <th>Target</th>
+              <th>{t('th.number')}</th>
+              <th style={{ textAlign: 'start' }}>{t('th.name')}</th>
+              <th>{t('th.nickname')}</th>
+              <th>{t('th.subcontractor')}</th>
+              <th>{t('th.target')}</th>
               <th />
             </tr>
           </thead>
@@ -247,13 +256,13 @@ export function MasterScreen({ role }: { role: Role }) {
                 <td className="derived">{e.num}</td>
                 <td className="derived" style={{ textAlign: 'start' }}>
                   {e.name}
-                  {!e.active && <span className="mini"> (not employed)</span>}
+                  {!e.active && <span className="mini"> {t('master.notEmployed')}</span>}
                 </td>
                 <td className="derived">{e.nick}</td>
-                <td className="derived">{e.contractor ?? 'internal'}</td>
+                <td className="derived">{e.contractor ?? t('master.internal')}</td>
                 <td className="derived">
                   {e.effective_target}
-                  {e.target_hours === null && <span className="mini"> (default)</span>}
+                  {e.target_hours === null && <span className="mini"> {t('master.default')}</span>}
                 </td>
                 <td className="actcell">{actions('employees', e.num, `${e.name} (${e.num})`, e)}</td>
               </tr>
@@ -263,20 +272,20 @@ export function MasterScreen({ role }: { role: Role }) {
       </Section>
 
       <Section
-        title="Projects"
+        title={t('master.section.projects')}
         count={projects.data?.length}
         query={projects}
         onAdd={canWrite ? () => setEditing({ entity: 'projects', record: null }) : undefined}
-        addLabel="Add project"
+        addLabel={t('master.add.project')}
       >
         <table className="xl" style={{ fontSize: 12.5, minWidth: 680 }}>
           <thead>
             <tr>
-              <th>Number</th>
-              <th style={{ textAlign: 'start' }}>Name</th>
-              <th>Nickname</th>
-              <th>Customer</th>
-              <th>Type</th>
+              <th>{t('th.number')}</th>
+              <th style={{ textAlign: 'start' }}>{t('th.name')}</th>
+              <th>{t('th.nickname')}</th>
+              <th>{t('th.customer')}</th>
+              <th>{t('th.type')}</th>
               <th />
             </tr>
           </thead>
@@ -291,7 +300,7 @@ export function MasterScreen({ role }: { role: Role }) {
                 <td className="derived">{p.client}</td>
                 <td className="derived">
                   <span className={`pill ${p.overhead ? 'y' : 'g'}`}>
-                    {p.overhead ? 'overhead' : 'productive'}
+                    {p.overhead ? t('master.overhead') : t('master.productive')}
                   </span>
                 </td>
                 <td className="actcell">{actions('projects', p.num, `${p.name} (${p.num})`, p)}</td>
@@ -304,18 +313,18 @@ export function MasterScreen({ role }: { role: Role }) {
       <div className="row">
         <div style={{ flex: 1, minWidth: 320 }}>
           <Section
-            title="Departments"
+            title={t('master.section.departments')}
             count={departments.data?.length}
             query={departments}
             onAdd={canWrite ? () => setEditing({ entity: 'departments', record: null }) : undefined}
-            addLabel="Add department"
+            addLabel={t('master.add.department')}
           >
             <table className="xl" style={{ fontSize: 12.5, minWidth: 300 }}>
               <thead>
                 <tr>
-                  <th style={{ textAlign: 'start' }}>Department</th>
-                  <th>Code</th>
-                  <th>Bucket</th>
+                  <th style={{ textAlign: 'start' }}>{t('th.department')}</th>
+                  <th>{t('th.code')}</th>
+                  <th>{t('th.bucket')}</th>
                   <th />
                 </tr>
               </thead>
@@ -327,7 +336,7 @@ export function MasterScreen({ role }: { role: Role }) {
                     </td>
                     <td className="derived">{d.num ?? '—'}</td>
                     <td className="derived">
-                      {d.bucket ?? <span className="mini">non-productive</span>}
+                      {d.bucket ?? <span className="mini">{t('master.nonProductive')}</span>}
                     </td>
                     <td className="actcell">{actions('departments', d.name, d.name, d)}</td>
                   </tr>
@@ -339,19 +348,19 @@ export function MasterScreen({ role }: { role: Role }) {
 
         <div style={{ flex: 1, minWidth: 320 }}>
           <Section
-            title="Repairs"
+            title={t('master.section.repairs')}
             count={repairs.data?.length}
             query={repairs}
             onAdd={canWrite ? () => setEditing({ entity: 'repairs', record: null }) : undefined}
-            addLabel="Add repair"
+            addLabel={t('master.add.repair')}
           >
             <table className="xl" style={{ fontSize: 12.5, minWidth: 320 }}>
               <thead>
                 <tr>
-                  <th>Number</th>
-                  <th style={{ textAlign: 'start' }}>Customer</th>
-                  <th>Date</th>
-                  <th>Model</th>
+                  <th>{t('th.number')}</th>
+                  <th style={{ textAlign: 'start' }}>{t('th.customer')}</th>
+                  <th>{t('th.date')}</th>
+                  <th>{t('th.model')}</th>
                   <th />
                 </tr>
               </thead>
@@ -366,7 +375,7 @@ export function MasterScreen({ role }: { role: Role }) {
                       <span dir="ltr">{r.date ?? '—'}</span>
                     </td>
                     <td className="derived">{r.model ?? '—'}</td>
-                    <td className="actcell">{actions('repairs', r.fix, `repair ${r.fix}`, r)}</td>
+                    <td className="actcell">{actions('repairs', r.fix, `${t('entity.repair')} ${r.fix}`, r)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -376,21 +385,21 @@ export function MasterScreen({ role }: { role: Role }) {
       </div>
 
       <Section
-        title="Standard hours"
+        title={t('master.section.standard')}
         count={standard.data?.length}
         query={standard}
         onAdd={canWrite ? () => setEditing({ entity: 'standard', record: null }) : undefined}
-        addLabel="Add box"
+        addLabel={t('master.add.box')}
         note={<OrphanNote boxes={standard.data ?? []} projectNums={new Set((projects.data ?? []).map((p) => p.num))} />}
       >
         <div style={{ maxHeight: 380, overflow: 'auto' }}>
           <table className="xl" style={{ fontSize: 12, minWidth: 520 }}>
             <thead>
               <tr>
-                <th>Box</th>
-                <th style={{ textAlign: 'start' }}>Description</th>
-                <th>Parent</th>
-                <th>Total</th>
+                <th>{t('th.box')}</th>
+                <th style={{ textAlign: 'start' }}>{t('th.description')}</th>
+                <th>{t('th.parent')}</th>
+                <th>{t('th.total')}</th>
                 <th />
               </tr>
             </thead>
@@ -405,7 +414,7 @@ export function MasterScreen({ role }: { role: Role }) {
                   <td className="derived">
                     <b>{s.total}</b>
                   </td>
-                  <td className="actcell">{actions('standard', s.box, `box ${s.box}`, s)}</td>
+                  <td className="actcell">{actions('standard', s.box, `${t('th.box')} ${s.box}`, s)}</td>
                 </tr>
               ))}
             </tbody>
@@ -417,15 +426,15 @@ export function MasterScreen({ role }: { role: Role }) {
         <Modal
           title={
             editing.record
-              ? `Edit ${LABEL[editing.entity]}`
-              : `Add ${LABEL[editing.entity]}`
+              ? t('master.editTitle', { label: t(ENTITY_LABEL[editing.entity]) })
+              : t('master.addTitle', { label: t(ENTITY_LABEL[editing.entity]) })
           }
           onClose={() => setEditing(null)}
         >
           <RecordForm
             fields={FIELDS[editing.entity]}
             record={editing.record}
-            submitLabel={editing.record ? 'Save' : 'Add'}
+            submitLabel={editing.record ? t('common.save') : t('common.add')}
             onCancel={() => setEditing(null)}
             onSubmit={(values) => save(editing.entity, values)}
           />
@@ -434,7 +443,7 @@ export function MasterScreen({ role }: { role: Role }) {
 
       {deleting && (
         <ConfirmDialog
-          message={`Delete ${deleting.label}?`}
+          message={t('master.deleteConfirm', { label: deleting.label })}
           onConfirm={confirmDelete}
           onCancel={() => setDeleting(null)}
           busy={deleters[deleting.entity].isPending}
@@ -445,14 +454,6 @@ export function MasterScreen({ role }: { role: Role }) {
     </>
   );
 }
-
-const LABEL: Record<Entity, string> = {
-  employees: 'employee',
-  projects: 'project',
-  departments: 'department',
-  standard: 'standard-hours box',
-  repairs: 'repair',
-};
 
 function Kpi({ value, label }: { value: ReactNode; label: string }) {
   return (
@@ -485,6 +486,7 @@ function Section({
   note?: ReactNode;
   children: ReactNode;
 }) {
+  const t = useT();
   return (
     <div className="card">
       <div className="toolbar" style={{ marginBottom: 8 }}>
@@ -500,13 +502,13 @@ function Section({
       </div>
       {note}
       {query.isLoading ? (
-        <div className="empty">Loading…</div>
+        <div className="empty">{t('common.loading')}</div>
       ) : query.error ? (
         <div className="empty" style={{ color: '#c33' }}>
-          {query.error instanceof Error ? query.error.message : 'Failed to load'}
+          {query.error instanceof Error ? query.error.message : t('common.failedToLoad')}
         </div>
       ) : count === 0 ? (
-        <div className="empty">Nothing here yet</div>
+        <div className="empty">{t('master.nothingHere')}</div>
       ) : (
         <div className="xl-scroll" style={{ maxHeight: 360 }}>
           {children}
@@ -527,6 +529,7 @@ function OrphanNote({
   boxes: { parent: number | null; total: number }[];
   projectNums: Set<number>;
 }) {
+  const t = useT();
   if (boxes.length === 0 || projectNums.size === 0) return null;
   const orphans = boxes.filter((b) => b.parent !== null && !projectNums.has(b.parent));
   if (orphans.length === 0) return null;
@@ -534,8 +537,12 @@ function OrphanNote({
   const hours = orphans.reduce((s, b) => s + b.total, 0);
   return (
     <div className="pill y" style={{ display: 'block', padding: '8px 12px', marginBottom: 10 }}>
-      {orphans.length} of {boxes.length} boxes reference {distinct} parent projects that do not exist
-      ({hours.toLocaleString()} standard hours). These are invisible to budget-vs-actual.
+      {t('master.orphan', {
+        orphans: orphans.length,
+        boxes: boxes.length,
+        distinct,
+        hours: hours.toLocaleString(),
+      })}
     </div>
   );
 }

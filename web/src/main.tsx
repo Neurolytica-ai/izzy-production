@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ApiError } from './api/client.ts';
 import { App } from './App.tsx';
+import { I18nProvider } from './i18n/index.tsx';
 import './styles.css';
 
 const queryClient = new QueryClient({
@@ -25,8 +26,10 @@ if (!root) throw new Error('#root is missing from index.html');
 
 createRoot(root).render(
   <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <App />
-    </QueryClientProvider>
+    <I18nProvider>
+      <QueryClientProvider client={queryClient}>
+        <App />
+      </QueryClientProvider>
+    </I18nProvider>
   </StrictMode>
 );

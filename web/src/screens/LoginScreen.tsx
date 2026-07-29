@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { ApiError, api, type CurrentUser } from '../api/client.ts';
+import { useT } from '../i18n/index.tsx';
 
 interface Props {
   onSignedIn: (user: CurrentUser) => void;
@@ -8,6 +9,7 @@ interface Props {
 }
 
 export function LoginScreen({ onSignedIn, error }: Props) {
+  const t = useT();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
@@ -23,7 +25,7 @@ export function LoginScreen({ onSignedIn, error }: Props) {
     } catch (err) {
       // The server returns one message for every failure mode by design, so
       // there is nothing to add here — show what it said.
-      setFailure(err instanceof ApiError ? err.message : 'Sign-in failed.');
+      setFailure(err instanceof ApiError ? err.message : t('login.failed'));
     } finally {
       setBusy(false);
     }
@@ -45,13 +47,13 @@ export function LoginScreen({ onSignedIn, error }: Props) {
         style={{ width: '100%', maxWidth: 360, padding: 24 }}
       >
         <div className="section-title" style={{ fontSize: 17, marginBottom: 4 }}>
-          Izzy Yogev Technologies
+          {t('login.title')}
         </div>
         <div className="mini" style={{ marginBottom: 18 }}>
-          Production Management &amp; Control
+          {t('login.subtitle')}
         </div>
 
-        <label htmlFor="username">Username</label>
+        <label htmlFor="username">{t('login.username')}</label>
         <input
           id="username"
           value={username}
@@ -62,7 +64,7 @@ export function LoginScreen({ onSignedIn, error }: Props) {
           style={{ width: '100%', marginBottom: 12 }}
         />
 
-        <label htmlFor="password">Password</label>
+        <label htmlFor="password">{t('login.password')}</label>
         <input
           id="password"
           type="password"
@@ -74,7 +76,7 @@ export function LoginScreen({ onSignedIn, error }: Props) {
         />
 
         <button className="btn" type="submit" disabled={busy} style={{ width: '100%' }}>
-          {busy ? 'Signing in…' : 'Sign in'}
+          {busy ? t('login.signingIn') : t('login.signIn')}
         </button>
 
         {failure && (
