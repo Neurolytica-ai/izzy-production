@@ -1,0 +1,56 @@
+PROGRESS REPORT — Izzy Yogev Production System
+Date: 2026-07-28 (afternoon session)
+
+PHASE 2 FRONT END — BUILT
+- Hours Reporting grid: draft-row entry, autocomplete cells, keyboard
+  traversal, live derived columns, status dots, over-target confirmation,
+  submit-day.
+- Reports Archive: server-side paging, sorting, filtering, and totals.
+- Plus a reusable autocomplete component, the reports API client methods,
+  and the React Query hooks.
+- typecheck and production build both green.
+- Not yet click-tested in a browser — will be done on the live site.
+
+BUGS FIXED
+- Grid save-rollback bug: a row marked itself "saved" before the server
+  confirmed, so a failed/cancelled save left an unsaved value that never
+  retried. Now rolls back correctly.
+- Two latent deploy bugs caught (see deploy kit below).
+
+ADMIN ACCOUNT
+- Reset the existing "admin" login so there is a working account (stored in
+  password manager).
+- Confirmed the backend runs against the live Supabase database.
+
+DEPLOYMENT UNBLOCKED (Arad's reply)
+- Permission granted; Docker is the preferred approach.
+- The client owns the server.
+- Real hostname assigned: srv1859122.hstgr.cloud — verified it points at the
+  server, so HTTPS is now possible (the domain was the one true blocker).
+
+DEPLOY KIT PREPARED
+- docs/DEPLOY.md: full step-by-step SSH runbook (harden server -> create
+  neurolytica sudo user + disable root, install Docker, clone, configure .env,
+  HTTP bootstrap, issue TLS certificate, switch to HTTPS, renewal cron,
+  troubleshooting).
+- nginx HTTP + HTTPS configs, updated docker-compose.yml, and a production
+  .env template (includes the Hebrew interface switch).
+- Fixed two deploy bugs: gitignored public/ would not exist on the server, and
+  a volume-permission error.
+
+REPOSITORY
+- Now lives under the Neurolytica-ai GitHub org.
+- Nothing committed today (per instruction).
+
+PHASE STATUS
+- Phase 0 (Foundations): software/DB done; server provisioning + HTTPS now
+  ready to execute via the runbook.
+- Phase 1: done.
+- Phase 2: built; pending a browser click-through on the live site.
+- Phase 3 (Excel import/export): blocked on the 7 real Excel files.
+- Phases 4-5: not started.
+
+NEXT UP
+- Run the deployment (using docs/DEPLOY.md).
+- Click-through the grid and archive on the live site.
+- Chase Arad for the Excel files to unblock Phase 3.

@@ -9,8 +9,14 @@ public/
 .env
 .env.*
 !.env.example
+!.env.production.example
 *.pem
 *.key
+
+# The live-selected nginx config (copied from default.conf or https.conf during
+# deploy). Kept out of git so the two templates stay the source of truth and a
+# server-side switch never shows up as a repo change.
+nginx/active.conf
 
 # Local artifacts
 *.log
