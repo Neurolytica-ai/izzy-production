@@ -45,7 +45,7 @@ interface Envelope<T> {
   count?: number;
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function requestRaw<T>(method: string, path: string, body?: unknown): Promise<T> {
   let res: Response;
   try {
     res = await fetch(path, {
@@ -83,7 +83,13 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     );
   }
 
-  return (parsed as Envelope<T>).data;
+  return parsed as T;
+}
+
+/** Unwraps the standard `{ data }` envelope — the shape almost every endpoint returns. */
+async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const raw = await requestRaw<Envelope<T>>(method, path, body);
+  return raw.data;
 }
 
 const get = <T>(path: string) => request<T>('GET', path);
@@ -192,6 +198,86 @@ export interface ResolvedRow {
   unresolved: string[];
 }
 
+/**
+ * A row of `v_reports_full` — every derived field resolved by the server, so the
+ * grid and the archive render the same shape and neither has to resolve anything
+ * itself. Hours come back as a string because the column is `numeric`; render and
+ * arithmetic go through Number().
+ */
+export interface ReportRow {
+  id: number;
+  date: string;
+  emp_num: number;
+  emp_nick: string;
+  emp_name: string;
+  contractor: string | null;
+  effective_target: number;
+  proj_num: number | null;
+  proj_nick: string | null;
+  proj_name: string | null;
+  client: string | null;
+  overhead: boolean | null;
+  fix: number | null;
+  display_proj_name: string | null;
+  repair_client: string | null;
+  dept: string;
+  dept_num: number | null;
+  bucket: string | null;
+  hours: number | string;
+  created_by: number | null;
+  created_by_name: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** What the grid sends for a create/update — typed values, resolved server-side. */
+export interface ReportInput {
+  date?: string;
+  emp?: string | number | null;
+  proj?: string | number | null;
+  fix?: string | number | null;
+  dept?: string;
+  hours?: number;
+  acknowledgeOverTarget?: boolean;
+}
+
+export interface ReportListParams {
+  date?: string;
+  from?: string;
+  to?: string;
+  emp?: number;
+  proj?: number;
+  client?: string;
+  dept?: string;
+  q?: string;
+  limit?: number;
+  offset?: number;
+  sort?: 'date' | 'emp_nick' | 'emp_name' | 'proj_nick' | 'proj_name' | 'client' | 'dept' | 'hours' | 'fix';
+  dir?: 'asc' | 'desc';
+}
+
+export interface ReportListMeta {
+  totalRows: number;
+  totalHours: number;
+  days: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
+
+export interface ReportPage {
+  data: ReportRow[];
+  count: number;
+  meta: ReportListMeta;
+}
+
+export interface SubmittedDay {
+  date: string;
+  submitted_at: string;
+  row_count: number;
+  submitted_by_name: string | null;
+}
+
 export interface AppConfig {
   lang: 'en' | 'he';
   dir: 'ltr' | 'rtl';
@@ -277,6 +363,31 @@ export const api = {
     setPassword: (id: number, password: string) =>
       put<void>(`/api/users/${id}/password`, { password }),
     remove: (id: number) => del<void>(`/api/users/${id}`),
+  },
+
+  reports: {
+    list: (params: ReportListParams = {}) => {
+      const qs = new URLSearchParams();
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== undefined && v !== null && v !== '') qs.set(k, String(v));
+      }
+      const suffix = qs.toString();
+      return requestRaw<ReportPage>('GET', `/api/reports${suffix ? `?${suffix}` : ''}`);
+    },
+    create: (body: ReportInput) => post<ReportRow>('/api/reports', body),
+    update: (id: number, body: ReportInput) => put<ReportRow>(`/api/reports/${id}`, body),
+    remove: (id: number) => del<void>(`/api/reports/${id}`),
+    submitDay: (date: string) =>
+      post<{ date: string; submitted_at: string; row_count: number }>('/api/reports/submit-day', {
+        date,
+      }),
+    submittedDays: (range: { from?: string; to?: string } = {}) => {
+      const qs = new URLSearchParams();
+      if (range.from) qs.set('from', range.from);
+      if (range.to) qs.set('to', range.to);
+      const suffix = qs.toString();
+      return get<SubmittedDay[]>(`/api/reports/submitted-days${suffix ? `?${suffix}` : ''}`);
+    },
   },
 
   lookup: {

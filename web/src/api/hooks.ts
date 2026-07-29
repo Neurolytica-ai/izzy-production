@@ -20,6 +20,8 @@ import {
   type Employee,
   type Project,
   type Repair,
+  type ReportInput,
+  type ReportListParams,
   type StandardBox,
   type UserAccount,
 } from './client.ts';
@@ -35,6 +37,8 @@ export const keys = {
   repairs: ['repairs'] as const,
   buckets: ['buckets'] as const,
   users: ['users'] as const,
+  reports: (params: ReportListParams) => ['reports', params] as const,
+  submittedDays: (range: { from?: string; to?: string }) => ['submittedDays', range] as const,
 };
 
 /** Master data changes rarely; no need to refetch it on every mount. */
@@ -111,6 +115,30 @@ export function useUsers() {
   return useQuery({ queryKey: keys.users, queryFn: api.users.list });
 }
 
+/**
+ * The reporting grid and the archive both read through this. Reports change far
+ * more often than master data, so there is no long stale time — after any write
+ * the mutations below invalidate every `['reports', …]` key and the visible query
+ * refetches, which is what keeps two people entering the same day consistent
+ * (WP §6.1) without the client trusting its own copy.
+ */
+export function useReports(params: ReportListParams) {
+  return useQuery({
+    queryKey: keys.reports(params),
+    queryFn: () => api.reports.list(params),
+    // Keep the previous page on screen while the next one loads, so paging and
+    // sorting in the archive do not flash empty.
+    placeholderData: (prev) => prev,
+  });
+}
+
+export function useSubmittedDays(range: { from?: string; to?: string } = {}) {
+  return useQuery({
+    queryKey: keys.submittedDays(range),
+    queryFn: () => api.reports.submittedDays(range),
+  });
+}
+
 /* -------------------------------------------------------------------------- */
 /* Mutations                                                                  */
 /* -------------------------------------------------------------------------- */
@@ -174,6 +202,30 @@ export const useUpdateRepair = () =>
     api.repairs.update(fix, body)
   );
 export const useDeleteRepair = () => useMasterMutation((fix: number) => api.repairs.remove(fix));
+
+/**
+ * Every report write can change a day's totals, its status dots and the archive's
+ * aggregates, so all report and submitted-day queries are invalidated wholesale
+ * rather than surgically. The over-target case is *not* handled here: the server
+ * answers a would-be-over-target write with 409 `over_target`, and the grid is
+ * what decides whether to confirm and retry with `acknowledgeOverTarget`.
+ */
+export function useReportMutations() {
+  const qc = useQueryClient();
+  const invalidate = () => {
+    void qc.invalidateQueries({ queryKey: ['reports'] });
+    void qc.invalidateQueries({ queryKey: ['submittedDays'] });
+  };
+  return {
+    create: useMutation({ mutationFn: (body: ReportInput) => api.reports.create(body), onSuccess: invalidate }),
+    update: useMutation({
+      mutationFn: ({ id, ...body }: ReportInput & { id: number }) => api.reports.update(id, body),
+      onSuccess: invalidate,
+    }),
+    remove: useMutation({ mutationFn: (id: number) => api.reports.remove(id), onSuccess: invalidate }),
+    submitDay: useMutation({ mutationFn: (date: string) => api.reports.submitDay(date), onSuccess: invalidate }),
+  } as const;
+}
 
 export function useUserMutations() {
   const qc = useQueryClient();

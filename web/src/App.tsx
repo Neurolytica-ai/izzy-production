@@ -3,9 +3,11 @@ import { useQueryClient } from '@tanstack/react-query';
 import { ApiError, api } from './api/client.ts';
 import { keys, useAppConfig, useMe } from './api/hooks.ts';
 import { useHashTab } from './useHashTab.ts';
+import { ArchiveScreen } from './screens/ArchiveScreen.tsx';
 import { LoginScreen } from './screens/LoginScreen.tsx';
 import { MasterScreen } from './screens/MasterScreen.tsx';
 import { Placeholder } from './screens/Placeholder.tsx';
+import { ReportScreen } from './screens/ReportScreen.tsx';
 
 /**
  * The seven tabs from the prototype, in its order. Kept even where the screen is
@@ -99,7 +101,11 @@ export function App() {
       </nav>
 
       <main>
-        {tab === 'master' ? (
+        {tab === 'report' ? (
+          <ReportScreen />
+        ) : tab === 'archive' ? (
+          <ArchiveScreen role={user.role} />
+        ) : tab === 'master' ? (
           <MasterScreen role={user.role} />
         ) : (
           <Placeholder
