@@ -89,6 +89,13 @@ export function AutocompleteCell<T>({
   const [hl, setHl] = useState(0);
   const [rect, setRect] = useState<DOMRect | null>(null);
 
+  // Whether the user has moved the highlight with the arrow keys. Enter on an
+  // EMPTY cell must skip to the next field, not silently pick the first
+  // suggestion (client feedback 2026-08-03 #4: focusing Project used to make "a
+  // specific project name appear immediately") — unless the user deliberately
+  // arrowed onto one.
+  const navigated = useRef(false);
+
   // A monotonic request id: only the newest search is allowed to set state, so a
   // slow response for an earlier keystroke cannot clobber a newer one.
   const seq = useRef(0);
@@ -100,6 +107,7 @@ export function AutocompleteCell<T>({
       if (id !== seq.current) return;
       setMatches(results);
       setHl(0);
+      navigated.current = false;
       setOpen(results.length > 0);
     });
   };
@@ -136,23 +144,38 @@ export function AutocompleteCell<T>({
     if (!m) return;
     onPick(m.value);
     close();
-    if (inputRef.current && !advanceWithinRow(inputRef.current)) onEnterEnd?.();
+    // Deferred so the pick's state update renders first: choosing a project
+    // disables the ticket cell (and vice versa), and advanceWithinRow must see
+    // that cell already disabled to skip it (client feedback 2026-08-03 #3).
+    setTimeout(() => {
+      if (inputRef.current && !advanceWithinRow(inputRef.current)) onEnterEnd?.();
+    }, 0);
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (open && matches.length) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
+        navigated.current = true;
         setHl((h) => Math.min(h + 1, matches.length - 1));
         return;
       }
       if (e.key === 'ArrowUp') {
         e.preventDefault();
+        navigated.current = true;
         setHl((h) => Math.max(h - 1, 0));
         return;
       }
       if (e.key === 'Enter') {
         e.preventDefault();
+        // An empty cell + Enter means "skip this field", not "take the first
+        // suggestion the dropdown happens to show". Only a typed query or an
+        // explicit arrow-key highlight makes Enter a pick.
+        if (value.trim() === '' && !navigated.current) {
+          close();
+          if (!advanceWithinRow(e.currentTarget)) onEnterEnd?.();
+          return;
+        }
         pick(hl);
         return;
       }

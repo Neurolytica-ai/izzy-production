@@ -92,6 +92,37 @@ class Session {
   put = (p: string, b?: unknown) => this.req('PUT', p, b);
   del = (p: string) => this.req('DELETE', p);
   hasCookie = () => this.cookie !== '';
+
+  /** GET returning the raw bytes — for the Excel download endpoints. */
+  async getBinary(path: string) {
+    const headers: Record<string, string> = {};
+    if (this.cookie) headers.cookie = this.cookie;
+    const res = await fetch(`${this.base}${path}`, { headers });
+    return {
+      status: res.status,
+      contentType: res.headers.get('content-type') ?? '',
+      buf: Buffer.from(await res.arrayBuffer()),
+    };
+  }
+
+  /** Multipart upload, for the Excel import endpoints. */
+  async upload(path: string, buf: Buffer, filename = 'test.xlsx') {
+    const fd = new FormData();
+    fd.append('file', new Blob([new Uint8Array(buf)]), filename);
+    const headers: Record<string, string> = {};
+    if (this.cookie) headers.cookie = this.cookie;
+    const res = await fetch(`${this.base}${path}`, { method: 'POST', headers, body: fd });
+    let json: any = null;
+    if (res.status !== 204) {
+      const txt = await res.text();
+      try {
+        json = txt ? JSON.parse(txt) : null;
+      } catch {
+        json = txt;
+      }
+    }
+    return { status: res.status, json, raw: res };
+  }
 }
 
 async function main() {
@@ -569,6 +600,15 @@ async function main() {
     );
     await reporter.del(`/api/reports/${repairRow.json.data.id}`);
 
+    // Client feedback 2026-08-03 (#3/#5) settled OPEN-QUESTIONS #4: a row is a
+    // project row OR a repair row, never both.
+    const bothRow = await reporter.post(
+      '/api/reports',
+      mk({ date: '2026-07-23', fix: 16989, hours: 3 })
+    );
+    check('a row with both project and repair -> 400', bothRow.status, 400);
+    check('  with a specific code', bothRow.json.error, 'project_or_repair_exclusive');
+
     // ---- submit day (WP §7.3) --------------------------------------------
     console.log('\nSubmit day:');
     const submitted = await reporter.post('/api/reports/submit-day', { date: '2026-07-22' });
@@ -645,6 +685,149 @@ async function main() {
     check('  deleting it again -> 404', (await reporter.del(`/api/reports/${ackId}`)).status, 404);
     const afterDelete = await reporter.get('/api/reports?date=2026-07-22');
     check('  the remaining row is untouched', afterDelete.json.meta.totalRows, 1);
+
+    // ---- Excel import (WP §6.5, §9.2) --------------------------------------
+    console.log('\nExcel import:');
+    const XLSX = await import('xlsx');
+    const sheetBuf = (aoa: unknown[][]): Buffer => {
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+      return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+    };
+
+    const IMP_A = TEST_EMP_BASE + 100;
+    const IMP_B = TEST_EMP_BASE + 101;
+    // Header row is NOT the first row, and one row has a malformed number —
+    // both are §9 requirements (auto header detection; skip + report bad rows).
+    const empFile = sheetBuf([
+      ['קובץ עובדים לדוגמה'],
+      ["מס' עובד", 'שם עובד', 'מוקלד', 'סטטוס'],
+      [IMP_A, 'בדיקה ראשון - סלים', 'בדיקה1', 'עובד'],
+      ['abc', 'שורה שגויה', '', 'עובד'],
+      [IMP_B, 'בדיקה שני', 'בדיקה2', 'לא עובד'],
+    ]);
+
+    check(
+      'a reporter cannot import -> 403',
+      (await reporter.upload('/api/import/employees/preview', empFile)).status,
+      403
+    );
+
+    const empPrev = await manager.upload('/api/import/employees/preview', empFile);
+    check('employees preview -> 200', empPrev.status, 200);
+    check('  tags 2 rows as new', empPrev.json.data.counts.new, 2);
+    check('  reports the malformed row as invalid', empPrev.json.data.counts.invalid, 1);
+    check('  with its Excel row number', empPrev.json.data.errors[0].row, 4);
+    const notYet = await db.query('SELECT count(*)::int AS n FROM employees WHERE num = $1', [IMP_A]);
+    check('  preview writes nothing', notYet.rows[0].n, 0);
+
+    const empCommit = await manager.upload('/api/import/employees/commit', empFile);
+    check('employees commit -> 200', empCommit.status, 200);
+    check('  applied 2 rows', empCommit.json.data.applied, 2);
+    const impA = await db.query(
+      'SELECT name, nick, active, contractor FROM employees WHERE num = $1',
+      [IMP_A]
+    );
+    check('  contractor derived from the name suffix', impA.rows[0].contractor, 'סלים');
+    const impB = await db.query('SELECT active FROM employees WHERE num = $1', [IMP_B]);
+    check("  'לא עובד' imports as inactive", impB.rows[0].active, false);
+
+    const empAgain = await manager.upload('/api/import/employees/preview', empFile);
+    check('re-importing the same file: all unchanged (WP §9.2)', empAgain.json.data.counts, {
+      new: 0,
+      updated: 0,
+      unchanged: 2,
+      invalid: 1,
+    });
+    const empRecommit = await manager.upload('/api/import/employees/commit', empFile);
+    check('  re-commit applies nothing', empRecommit.json.data.applied, 0);
+
+    // Attendance: date arrives as an Excel serial; unknown employees are row
+    // errors, not transaction failures.
+    const serial = Math.round((Date.UTC(2026, 6, 24) - Date.UTC(1899, 11, 30)) / 86_400_000);
+    const attFile = sheetBuf([
+      ['מס עובד', 'תאריך', 'סה"כ שעות'],
+      [IMP_A, serial, 9],
+      [777_777, serial, 8],
+    ]);
+    const attPrev = await manager.upload('/api/import/attendance/preview', attFile);
+    check('attendance preview: 1 new, 1 invalid', [attPrev.json.data.counts.new, attPrev.json.data.counts.invalid], [1, 1]);
+    await manager.upload('/api/import/attendance/commit', attFile);
+    const attRow = await db.query(
+      "SELECT hours::float AS hours, source FROM attendance WHERE emp_num = $1 AND date = '2026-07-24'",
+      [IMP_A]
+    );
+    check('  serial date converted and row upserted', attRow.rows[0].hours, 9);
+    check("  marked source='import'", attRow.rows[0].source, 'import');
+
+    // Bulk reports: nicknames resolve against master data; exact duplicates are
+    // consumed so a second load of the same file adds nothing.
+    const repFile = sheetBuf([
+      ['תאריך', 'עובד', 'שם הפרויקט + מס', 'דיווח שעות', 'מחלקה'],
+      ['2026-07-24', 'בדיקה1', 'testproj', 5, TEST_DEPT],
+      ['2026-07-24', 'בדיקה1', 'no-such-project', 2, TEST_DEPT],
+    ]);
+    const repPrev = await manager.upload('/api/import/reports/preview', repFile);
+    check('bulk reports preview: 1 new, 1 invalid', [repPrev.json.data.counts.new, repPrev.json.data.counts.invalid], [1, 1]);
+    const repCommit = await manager.upload('/api/import/reports/commit', repFile);
+    check('bulk reports commit applied 1', repCommit.json.data.applied, 1);
+    const repAgain = await manager.upload('/api/import/reports/commit', repFile);
+    check('  the same file again applies 0 (duplicates consumed)', repAgain.json.data.applied, 0);
+
+    check(
+      'a text file is rejected as unreadable -> 400',
+      (await manager.upload('/api/import/employees/preview', Buffer.from('not an excel file'))).status,
+      400
+    );
+    check(
+      'an unknown import type -> 400',
+      (await manager.upload('/api/import/nonsense/preview', empFile)).status,
+      400
+    );
+
+    // ---- Excel export (WP §9.3) --------------------------------------------
+    console.log('\nExcel export:');
+    const exp = await reporter.getBinary('/api/export/archive?q=בדיקה1');
+    check('archive export -> 200 for a reporter', exp.status, 200);
+    checkTrue('  is an xlsx download', exp.contentType.includes('spreadsheetml'), exp.contentType);
+    const expWb = XLSX.read(exp.buf, { type: 'buffer' });
+    const expRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(
+      expWb.Sheets[expWb.SheetNames[0]!]!
+    );
+    check('  filtered to the imported row', expRows.length, 1);
+    checkTrue(
+      '  with the prototype’s Hebrew headers',
+      expRows[0]! ['תאריך'] === '2026-07-24' && Number(expRows[0]!['שעות']) === 5,
+      JSON.stringify(expRows[0])
+    );
+    check('grid export -> 200', (await reporter.get('/api/export/report?date=2026-07-24')).status, 200);
+    check('activity export -> 200', (await admin.get('/api/export/activity')).status, 200);
+    check('unknown export view -> 400', (await admin.get('/api/export/nonsense')).status, 400);
+
+    // ---- dashboard (WP §6.4) -----------------------------------------------
+    console.log('\nWP §6.4 — dashboard:');
+    // The bulk-imported row (5h on testproj / Test Client, 2026-07-24) is the
+    // only row for that customer on that day, so the client filter isolates the
+    // test fixture from whatever real data shares the database.
+    const dash = await reporter.get(
+      `/api/dashboard?period=day&date=2026-07-24&client=${encodeURIComponent('Test Client')}`
+    );
+    check('GET /api/dashboard -> 200 for a reporter', dash.status, 200);
+    check('  KPI total matches the imported hours', Number(dash.json.data.kpis.total_hours), 5);
+    check('  productive share is 100%', Math.round(Number(dash.json.data.kpis.productive_pct)), 100);
+    const bRow = dash.json.data.budget.find((b: any) => b.proj_num === TEST_PROJ);
+    checkTrue('  budget table includes the test project', !!bRow, JSON.stringify(dash.json.data.budget));
+    check('  with the reported actual', Number(bRow?.actual), 5);
+    checkTrue('  clients list feeds the filter', dash.json.data.clients.includes('Test Client'));
+    const dashWeek = await reporter.get('/api/dashboard?period=week');
+    check('period=week resolves a range -> 200', dashWeek.status, 200);
+    checkTrue(
+      '  week ends at the last reported date',
+      dashWeek.json.data.period.from != null && dashWeek.json.data.period.to != null,
+      JSON.stringify(dashWeek.json.data.period)
+    );
+    check('period=day without a date -> 400', (await reporter.get('/api/dashboard?period=day')).status, 400);
 
     // ---- logout -----------------------------------------------------------
     console.log('\nLogout:');

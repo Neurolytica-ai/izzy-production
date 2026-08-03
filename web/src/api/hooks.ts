@@ -15,7 +15,9 @@ import {
 } from '@tanstack/react-query';
 import {
   api,
+  type ActivityListParams,
   type CurrentUser,
+  type DashboardParams,
   type Department,
   type Employee,
   type Project,
@@ -39,6 +41,9 @@ export const keys = {
   users: ['users'] as const,
   reports: (params: ReportListParams) => ['reports', params] as const,
   submittedDays: (range: { from?: string; to?: string }) => ['submittedDays', range] as const,
+  activity: (params: ActivityListParams) => ['activity', params] as const,
+  coverage: (date: string) => ['coverage', date] as const,
+  dashboard: (params: DashboardParams) => ['dashboard', params] as const,
 };
 
 /** Master data changes rarely; no need to refetch it on every mount. */
@@ -136,6 +141,60 @@ export function useSubmittedDays(range: { from?: string; to?: string } = {}) {
   return useQuery({
     queryKey: keys.submittedDays(range),
     queryFn: () => api.reports.submittedDays(range),
+  });
+}
+
+export function useCoverage(date: string) {
+  return useQuery({
+    queryKey: keys.coverage(date),
+    queryFn: () => api.coverage.list(date),
+    placeholderData: (prev) => prev,
+  });
+}
+
+/**
+ * Clock-hours edits refresh the coverage rows (variance is server-computed) and
+ * nothing else — reports are untouched by attendance.
+ */
+export function useSetAttendance() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ date, emp_num, hours }: { date: string; emp_num: number; hours: number | null }) =>
+      api.attendance.set(date, emp_num, hours),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['coverage'] }),
+  });
+}
+
+export function useDashboard(params: DashboardParams) {
+  return useQuery({
+    queryKey: keys.dashboard(params),
+    queryFn: () => api.dashboard.get(params),
+    placeholderData: (prev) => prev,
+  });
+}
+
+export function useActivity(params: ActivityListParams) {
+  return useQuery({
+    queryKey: keys.activity(params),
+    queryFn: () => api.activity.list(params),
+    placeholderData: (prev) => prev,
+  });
+}
+
+/** Action/entity display labels for the codes stored in activity_log. */
+export function useVocabulary() {
+  return useQuery({
+    queryKey: keys.vocabulary,
+    queryFn: api.meta.vocabulary,
+    staleTime: Infinity, // changes only on deploy
+  });
+}
+
+export function useClearActivity() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.activity.clear,
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['activity'] }),
   });
 }
 

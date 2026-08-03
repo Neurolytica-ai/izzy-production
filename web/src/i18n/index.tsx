@@ -16,7 +16,17 @@ import { STRINGS, type Lang, type StringKey } from './strings.ts';
 const STORAGE_KEY = 'izy_lang';
 const DEFAULT_LANG: Lang = 'he';
 
+/**
+ * Client feedback 2026-08-03 #9: no English option at this stage — it may come
+ * back later as additional development. While off, the header button is not
+ * rendered and any previously-saved 'en' choice is ignored (otherwise a user
+ * who had toggled to English would be stuck there with no way back). The full
+ * catalogue and toggle machinery stay: re-enabling is this one flag.
+ */
+const ENGLISH_ENABLED = false;
+
 function readInitial(): Lang {
+  if (!ENGLISH_ENABLED) return DEFAULT_LANG;
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved === 'en' || saved === 'he') return saved;
@@ -94,6 +104,7 @@ export function useT(): TFunction {
  */
 export function LangToggle() {
   const { lang, toggle } = useI18n();
+  if (!ENGLISH_ENABLED) return null;
   return (
     <button
       className="btn ghost sm"

@@ -45,22 +45,7 @@ interface Envelope<T> {
   count?: number;
 }
 
-async function requestRaw<T>(method: string, path: string, body?: unknown): Promise<T> {
-  let res: Response;
-  try {
-    res = await fetch(path, {
-      method,
-      // Same-origin in both dev (Vite proxy) and production (Nginx), so the
-      // session cookie is first-party and needs no CORS handling.
-      credentials: 'same-origin',
-      headers: body === undefined ? {} : { 'content-type': 'application/json' },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
-  } catch {
-    // fetch only rejects on a transport failure, never on a 4xx/5xx.
-    throw new ApiError(0, 'network', 'Cannot reach the server. Check your connection.');
-  }
-
+async function parseResponse<T>(res: Response): Promise<T> {
   if (res.status === 204) return undefined as T;
 
   const text = await res.text();
@@ -84,6 +69,37 @@ async function requestRaw<T>(method: string, path: string, body?: unknown): Prom
   }
 
   return parsed as T;
+}
+
+async function requestRaw<T>(method: string, path: string, body?: unknown): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method,
+      // Same-origin in both dev (Vite proxy) and production (Nginx), so the
+      // session cookie is first-party and needs no CORS handling.
+      credentials: 'same-origin',
+      headers: body === undefined ? {} : { 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  } catch {
+    // fetch only rejects on a transport failure, never on a 4xx/5xx.
+    throw new ApiError(0, 'network', 'Cannot reach the server. Check your connection.');
+  }
+  return parseResponse<T>(res);
+}
+
+/** Multipart upload — the browser sets the content-type (with its boundary) itself. */
+async function requestUpload<T>(path: string, file: File): Promise<T> {
+  const fd = new FormData();
+  fd.append('file', file);
+  let res: Response;
+  try {
+    res = await fetch(path, { method: 'POST', credentials: 'same-origin', body: fd });
+  } catch {
+    throw new ApiError(0, 'network', 'Cannot reach the server. Check your connection.');
+  }
+  return parseResponse<T>(res);
 }
 
 /** Unwraps the standard `{ data }` envelope — the shape almost every endpoint returns. */
@@ -278,6 +294,146 @@ export interface SubmittedDay {
   submitted_by_name: string | null;
 }
 
+export interface ActivityRow {
+  id: number;
+  ts: string;
+  user_id: number | null;
+  user_name: string | null;
+  /** Stable code — display label comes from /api/meta/vocabulary. */
+  action: string;
+  detail: string;
+  entity: string | null;
+  entity_key: string | null;
+}
+
+export interface ActivityListParams {
+  from?: string;
+  to?: string;
+  action?: string;
+  q?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ActivityPage {
+  data: ActivityRow[];
+  count: number;
+  meta: { totalRows: number; limit: number; offset: number; hasMore: boolean };
+}
+
+/** One row of fn_coverage — WP §5.5/§5.6. Numerics arrive as strings (pg numeric). */
+export interface CoverageRow {
+  emp_num: number;
+  nick: string;
+  name: string;
+  contractor: string | null;
+  is_contractor: boolean;
+  reported: number | string;
+  target: number | string;
+  status: 'complete' | 'partial' | 'not_reported';
+  clock: number | string | null;
+  variance: number | string | null;
+  flagged: boolean;
+}
+
+export interface DashboardKpis {
+  total_hours: number | string;
+  productive_hours: number | string;
+  overhead_hours: number | string;
+  productive_pct: number | string | null;
+  overhead_pct: number | string | null;
+  overruns: number;
+  savings: number;
+  no_standard: number;
+}
+
+export interface BudgetRow {
+  proj_num: number;
+  proj_nick: string;
+  proj_name: string;
+  client: string;
+  boxes: number;
+  std_total: number;
+  actual: number | string;
+  variance: number | string;
+  utilization: number | string | null;
+  state: 'overrun' | 'saving' | 'on_target' | 'no_standard';
+}
+
+export interface BucketRow {
+  bucket: string;
+  label_he: string;
+  hours: number | string;
+  sort_order: number;
+}
+
+export type DashPeriod = 'day' | 'week' | 'month' | 'all';
+
+export interface DashboardData {
+  period: { kind: DashPeriod; from: string | null; to: string | null };
+  kpis: DashboardKpis;
+  budget: BudgetRow[];
+  buckets: BucketRow[];
+  clients: string[];
+}
+
+export interface DashboardParams {
+  period: DashPeriod;
+  date?: string;
+  month?: string;
+  client?: string;
+}
+
+export type ImportType =
+  | 'employees'
+  | 'projects'
+  | 'departments'
+  | 'standard'
+  | 'repairs'
+  | 'attendance'
+  | 'reports';
+
+export interface ImportCounts {
+  new: number;
+  updated: number;
+  unchanged: number;
+  invalid: number;
+}
+
+export interface ImportRowError {
+  row: number;
+  reason: string;
+}
+
+export interface ImportPreview {
+  type: ImportType;
+  counts: ImportCounts;
+  rows: { status: 'new' | 'update' | 'unchanged'; label: string }[];
+  rowsTruncated: number;
+  errors: ImportRowError[];
+  errorsTruncated: number;
+}
+
+export interface ImportCommitResult {
+  type: ImportType;
+  applied: number;
+  counts: ImportCounts;
+  errors: ImportRowError[];
+  errorsTruncated: number;
+}
+
+export type ExportView = 'report' | 'archive' | 'activity';
+
+/** URL for a same-origin .xlsx download; the session cookie rides along. */
+export function exportUrl(view: ExportView, params: Record<string, string | undefined>): string {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== '') qs.set(k, v);
+  }
+  const suffix = qs.toString();
+  return `/api/export/${view}${suffix ? `?${suffix}` : ''}`;
+}
+
 export interface AppConfig {
   lang: 'en' | 'he';
   dir: 'ltr' | 'rtl';
@@ -388,6 +544,45 @@ export const api = {
       const suffix = qs.toString();
       return get<SubmittedDay[]>(`/api/reports/submitted-days${suffix ? `?${suffix}` : ''}`);
     },
+  },
+
+  coverage: {
+    list: (date: string) => get<CoverageRow[]>(`/api/coverage?date=${date}`),
+  },
+
+  attendance: {
+    /** hours: null clears the clock entry. Manager/admin only (server-enforced). */
+    set: (date: string, emp_num: number, hours: number | null) =>
+      requestRaw<unknown>('PUT', '/api/attendance', { date, emp_num, hours }),
+  },
+
+  dashboard: {
+    get: (params: DashboardParams) => {
+      const qs = new URLSearchParams();
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== undefined && v !== '') qs.set(k, String(v));
+      }
+      return get<DashboardData>(`/api/dashboard?${qs.toString()}`);
+    },
+  },
+
+  imports: {
+    preview: (type: ImportType, file: File) =>
+      requestUpload<{ data: ImportPreview }>(`/api/import/${type}/preview`, file).then((r) => r.data),
+    commit: (type: ImportType, file: File) =>
+      requestUpload<{ data: ImportCommitResult }>(`/api/import/${type}/commit`, file).then((r) => r.data),
+  },
+
+  activity: {
+    list: (params: ActivityListParams = {}) => {
+      const qs = new URLSearchParams();
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== undefined && v !== null && v !== '') qs.set(k, String(v));
+      }
+      const suffix = qs.toString();
+      return requestRaw<ActivityPage>('GET', `/api/activity-log${suffix ? `?${suffix}` : ''}`);
+    },
+    clear: () => del<void>('/api/activity-log'),
   },
 
   lookup: {

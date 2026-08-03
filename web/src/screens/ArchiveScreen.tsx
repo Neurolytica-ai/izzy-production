@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { ReportListParams, ReportRow, Role } from '../api/client.ts';
+import { exportUrl, type ReportListParams, type ReportRow, type Role } from '../api/client.ts';
 import { useReportMutations, useReports } from '../api/hooks.ts';
 import { ConfirmDialog } from '../components/Modal.tsx';
 import { useToast } from '../components/Toast.tsx';
@@ -120,6 +120,14 @@ export function ArchiveScreen({ role }: { role: Role }) {
               {t('archive.clear')}
             </button>
           )}
+          {/* WP §6.2/§9.3: the export mirrors the current filter and sort. */}
+          <a
+            className="btn sm ghost"
+            href={exportUrl('archive', { from, to, q: q.trim(), sort, dir })}
+            download
+          >
+            {t('common.exportExcel')}
+          </a>
         </div>
 
         <div className="row" style={{ marginBottom: 10 }}>
@@ -163,7 +171,11 @@ export function ArchiveScreen({ role }: { role: Role }) {
                       </td>
                       <td className="derived" style={{ textAlign: 'start' }} title={r.display_proj_name ?? ''}>
                         {r.fix != null ? (
-                          <span className="pill y">{t('archive.repairPill', { n: r.fix })}</span>
+                          // Same display as a project — full name incl. customer —
+                          // with only a color accent (client feedback #10).
+                          <span className="repair-name">
+                            {truncate(r.display_proj_name || t('archive.repairPill', { n: r.fix }), 40)}
+                          </span>
                         ) : (
                           truncate(r.display_proj_name ?? r.proj_nick ?? '—', 40)
                         )}

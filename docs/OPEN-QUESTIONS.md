@@ -54,10 +54,14 @@ nobody wanted is not.
 WP §4.5 says EITHER/OR with a CHECK constraint. The prototype's `finalizeDraft`
 (`:503`) accepts both being set.
 
-**Assumed for now:** the constraint is "at least one"
-(`reports_project_or_repair`), so the schema does not reject rows the existing UI
-can already produce. Tightening to `num_nonnulls(proj_num, fix) = 1` is a
-one-line change once confirmed.
+**ANSWERED by client feedback 2026-08-03 (Shai, items #3/#5): exactly one.**
+Selecting a project must disable the ticket field and vice versa; a ticket-only
+row is valid. Enforced 2026-08-03 in the API (`resolveOrThrow` rejects both with
+`project_or_repair_exclusive`) and in the grid (each cell locks while the other
+is filled). The DB CHECK stays "at least one" because rows written before this
+rule may carry both; tighten to `num_nonnulls(proj_num, fix) = 1` only after
+verifying `SELECT count(*) FROM reports WHERE proj_num IS NOT NULL AND fix IS
+NOT NULL` is zero in production (and cleaning up if not).
 
 ### 5. The real Excel files
 WP §9.1's column mappings do not match what the prototype's parsers actually do,

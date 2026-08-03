@@ -1,27 +1,15 @@
 <!doctype html>
 <!--
-  lang/dir default to Hebrew (the end users' language). The inline script below
-  applies the user's saved choice (localStorage 'izy_lang', set by the header
-  language toggle) BEFORE first paint, so there is no direction flash while the
-  React app mounts. src/i18n keeps the document in sync from then on.
+  Hebrew/RTL only for now (client feedback 2026-08-03 #9 removed the English
+  option; ENGLISH_ENABLED in src/i18n restores it, and this file's pre-paint
+  script then reads localStorage 'izy_lang' again so there is no direction
+  flash while the React app mounts).
 -->
 <html lang="he" dir="rtl">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Izzy Yogev — Production Management &amp; Control</title>
-    <script>
-      (function () {
-        try {
-          var l = localStorage.getItem('izy_lang');
-          if (l !== 'en' && l !== 'he') l = 'he';
-          document.documentElement.lang = l;
-          document.documentElement.dir = l === 'he' ? 'rtl' : 'ltr';
-        } catch (e) {
-          /* storage blocked — keep the he/rtl default in the <html> tag */
-        }
-      })();
-    </script>
   </head>
   <body>
     <div id="root"></div>

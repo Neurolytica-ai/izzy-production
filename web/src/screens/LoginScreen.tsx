@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { ApiError, api, type CurrentUser } from '../api/client.ts';
 import { useT } from '../i18n/index.tsx';
 
@@ -8,20 +8,34 @@ interface Props {
   error: ApiError | null;
 }
 
+/**
+ * Typed input survives anything that re-renders or remounts this screen (client
+ * feedback 2026-08-03 #1: "what was typed in the username disappears" when focus
+ * moves to the password). The fields are uncontrolled — React never writes their
+ * value, so no render can clobber what the browser holds — and the username is
+ * mirrored into module scope so even a full remount restores it. The password is
+ * deliberately not kept anywhere.
+ */
+let typedUsername = '';
+
 export function LoginScreen({ onSignedIn, error }: Props) {
   const t = useT();
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
+  const usernameRef = useRef<HTMLInputElement>(null);
+  const passwordRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (busy) return;
+    const username = usernameRef.current?.value.trim() ?? '';
+    const password = passwordRef.current?.value ?? '';
     setBusy(true);
     setFailure(null);
     try {
-      onSignedIn(await api.auth.login(username, password));
+      const user = await api.auth.login(username, password);
+      typedUsername = '';
+      onSignedIn(user);
     } catch (err) {
       // The server returns one message for every failure mode by design, so
       // there is nothing to add here — show what it said.
@@ -56,8 +70,12 @@ export function LoginScreen({ onSignedIn, error }: Props) {
         <label htmlFor="username">{t('login.username')}</label>
         <input
           id="username"
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
+          name="username"
+          ref={usernameRef}
+          defaultValue={typedUsername}
+          onChange={(e) => {
+            typedUsername = e.target.value;
+          }}
           autoComplete="username"
           autoFocus
           required
@@ -67,9 +85,9 @@ export function LoginScreen({ onSignedIn, error }: Props) {
         <label htmlFor="password">{t('login.password')}</label>
         <input
           id="password"
+          name="password"
           type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
+          ref={passwordRef}
           autoComplete="current-password"
           required
           style={{ width: '100%', marginBottom: 16 }}

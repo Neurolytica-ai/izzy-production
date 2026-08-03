@@ -32,6 +32,10 @@ button.btn{background:var(--blue);color:#fff;border:none;padding:8px 14px;border
 button.btn:hover{background:var(--navy);} button.btn.ghost{background:#eef2f9;color:var(--blue);}
 button.btn.sm{padding:5px 9px;font-size:12px;} button.btn.grn{background:#1e7e34;} button.btn.grn:hover{background:#155724;}
 .pill{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:700;}
+/* Repair tickets in lists: same layout as a project, just a color accent
+   (client feedback 2026-08-03 #10 — "a different color, not a completely
+   different display"). */
+.repair-name{color:#b45309;font-weight:600;}
 .g{background:var(--green);color:var(--greenT);} .r{background:var(--red);color:var(--redT);} .y{background:var(--yellow);color:var(--yellowT);}
 .dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-inline-start:5px;vertical-align:middle;}
 .dot.g{background:#33a852;} .dot.y{background:#f5b301;} .dot.r{background:#e8453c;}
@@ -65,6 +69,7 @@ td.actcell{text-align:center;width:36px;background:#fff;}
 .preview{margin-top:10px;border-top:1px solid var(--line);padding-top:10px;}
 .tag{font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px;margin-inline-start:5px;}
 .tag.add{background:#e4f6e7;color:#137333;} .tag.upd{background:#fff4d6;color:#8a6d00;} .tag.same{background:#eef1f7;color:#667;}
+.tag.err{background:#fdecea;color:#c5221f;}
 ::-webkit-scrollbar{width:10px;height:10px;}::-webkit-scrollbar-thumb{background:#c7d0e0;border-radius:5px;}
 .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#1e7e34;color:#fff;padding:11px 20px;border-radius:9px;font-weight:600;box-shadow:0 4px 16px rgba(0,0,0,.25);z-index:999;opacity:0;transition:.3s;}
 .toast.show{opacity:1;}

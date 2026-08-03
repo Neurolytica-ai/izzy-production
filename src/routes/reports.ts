@@ -179,6 +179,13 @@ async function resolveOrThrow(input: {
   if (!resolved.project && !resolved.repair) {
     throw new ApiError(400, t('db.checkFailed'), 'project_or_repair_required');
   }
+  // Client feedback 2026-08-03 (#3, #5) settled OPEN-QUESTIONS #4: a row is a
+  // project row OR a repair row, never both — exactly what WP §4.5 wanted. The
+  // DB CHECK stays "at least one" because rows written before this rule may
+  // carry both; new writes are refused here with a message that says why.
+  if (resolved.project && resolved.repair) {
+    throw new ApiError(400, t('report.projectOrRepairBoth'), 'project_or_repair_exclusive');
+  }
 
   return {
     emp_num: resolved.employee.emp_num,

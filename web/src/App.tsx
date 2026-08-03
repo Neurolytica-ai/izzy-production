@@ -6,6 +6,10 @@ import { LangToggle, useT } from './i18n/index.tsx';
 import type { StringKey } from './i18n/strings.ts';
 import { ArchiveScreen } from './screens/ArchiveScreen.tsx';
 import { LoginScreen } from './screens/LoginScreen.tsx';
+import { LogScreen } from './screens/LogScreen.tsx';
+import { ImportScreen } from './screens/ImportScreen.tsx';
+import { CoverageScreen } from './screens/CoverageScreen.tsx';
+import { DashScreen } from './screens/DashScreen.tsx';
 import { MasterScreen } from './screens/MasterScreen.tsx';
 import { Placeholder } from './screens/Placeholder.tsx';
 import { ReportScreen } from './screens/ReportScreen.tsx';
@@ -103,6 +107,14 @@ export function App() {
           <ArchiveScreen role={user.role} />
         ) : tab === 'master' ? (
           <MasterScreen role={user.role} />
+        ) : tab === 'log' ? (
+          <LogScreen role={user.role} />
+        ) : tab === 'import' ? (
+          <ImportScreen role={user.role} />
+        ) : tab === 'coverage' ? (
+          <CoverageScreen role={user.role} />
+        ) : tab === 'dash' ? (
+          <DashScreen />
         ) : (
           <Placeholder title={t(current.labelKey)} phase={current.phase} />
         )}

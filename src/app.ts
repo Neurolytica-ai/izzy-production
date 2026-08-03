@@ -16,6 +16,10 @@ import { lookupRouter } from './routes/lookup.ts';
 import { metaRouter } from './routes/meta.ts';
 import { reportsRouter } from './routes/reports.ts';
 import { attendanceRouter } from './routes/attendance.ts';
+import { activityRouter } from './routes/activity.ts';
+import { importsRouter } from './routes/imports.ts';
+import { exportsRouter } from './routes/exports.ts';
+import { dashboardRouter } from './routes/dashboard.ts';
 
 export function createApp() {
   const app = express();
@@ -66,9 +70,11 @@ export function createApp() {
   app.use('/api/meta', requireAuth, metaRouter);
   app.use('/api/reports', requireAuth, reportsRouter);
   app.use('/api', requireAuth, attendanceRouter);
+  app.use('/api', requireAuth, activityRouter);
+  app.use('/api/import', requireAuth, importsRouter);
+  app.use('/api/export', requireAuth, exportsRouter);
+  app.use('/api', requireAuth, dashboardRouter);
   app.use('/api', requireAuth, masterRouter);
-
-  // Phase 3 mounts import/export; Phase 4 the dashboard aggregates.
 
   app.use('/api', (_req, _res, next) => next(notFound('error.apiRouteMissing')));
   app.use(errorHandler);

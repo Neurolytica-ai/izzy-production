@@ -129,6 +129,74 @@ export const MSG = {
     he: 'פורמט נתונים שגוי',
   },
 
+  // ---- report rules --------------------------------------------------------
+  'report.projectOrRepairBoth': {
+    en: 'Choose a project or a repair ticket — not both',
+    he: 'יש לבחור פרויקט או תיקון — לא את שניהם',
+  },
+
+  // ---- Excel import (WP §9) ------------------------------------------------
+  'import.unknownType': {
+    en: 'Unknown import type',
+    he: 'סוג טעינה לא מוכר',
+  },
+  'import.noFile': {
+    en: 'No file was uploaded',
+    he: 'לא הועלה קובץ',
+  },
+  'import.badFile': {
+    en: 'The file could not be read as an Excel workbook',
+    he: 'לא ניתן לקרוא את הקובץ כקובץ אקסל',
+  },
+  'import.headerNotFound': {
+    en: 'Could not find the expected column headers in the first rows of the file',
+    he: 'לא נמצאו כותרות העמודות הצפויות בשורות הראשונות של הקובץ',
+  },
+  'import.noRows': {
+    en: 'No data rows were recognized in the file. Check that the columns match.',
+    he: 'לא זוהו נתונים בקובץ. ודא שהעמודות תואמות.',
+  },
+  'import.badNumber': {
+    en: 'Not a valid number: {v}',
+    he: 'מספר לא תקין: {v}',
+  },
+  'import.missingDate': {
+    en: 'Missing or unreadable date',
+    he: 'תאריך חסר או לא קריא',
+  },
+  'import.missingHours': {
+    en: 'Missing or invalid hours',
+    he: 'שעות חסרות או לא תקינות',
+  },
+  'import.empNotFound': {
+    en: 'Employee not found: {name}',
+    he: 'עובד לא נמצא: {name}',
+  },
+  'import.projNotFound': {
+    en: 'Project not found: {name}',
+    he: 'פרויקט לא נמצא: {name}',
+  },
+  'import.deptNotFound': {
+    en: 'Department not found: {name}',
+    he: 'מחלקה לא נמצאה: {name}',
+  },
+  'import.fixNotFound': {
+    en: 'Repair ticket not found: {n}',
+    he: 'תיקון לא נמצא: {n}',
+  },
+  'import.bothProjAndFix': {
+    en: 'Row has both a project and a repair ticket — only one is allowed',
+    he: 'בשורה גם פרויקט וגם תיקון — מותר רק אחד מהם',
+  },
+  'import.parentNotFound': {
+    en: 'Parent project {n} does not exist — load the projects file first',
+    he: 'פרויקט אב {n} אינו קיים — יש לטעון קודם את קובץ הפרויקטים',
+  },
+  'import.attEmpNotFound': {
+    en: 'Employee number {n} does not exist',
+    he: 'מספר עובד {n} אינו קיים',
+  },
+
   // ---- field validation --------------------------------------------------
   'field.required': {
     en: 'This field is required',

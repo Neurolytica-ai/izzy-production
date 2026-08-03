@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   api,
   ApiError,
+  exportUrl,
   type Department,
   type Employee,
   type Project,
@@ -83,7 +84,9 @@ function fromRow(r: ReportRow): GridModel {
     emp_name: r.emp_name,
     projText: r.proj_nick ?? '',
     proj_num: r.proj_num,
-    proj_name: r.proj_name,
+    // display_proj_name covers repairs too ("תיקון <n> · <client>"), so a ticket
+    // row names its customer like a project row does (client feedback #6).
+    proj_name: r.display_proj_name || r.proj_name,
     hours: String(r.hours),
     deptText: r.dept,
     dept_num: r.dept_num,
@@ -155,6 +158,13 @@ export function ReportScreen() {
   useEffect(() => {
     setDraft((d) => (d.empText || d.projText || d.hours || d.deptText || d.fixText ? d : emptyDraft(date)));
   }, [date]);
+
+  // commitDraft can be invoked from a stale closure (a suggestion pick defers the
+  // commit past its own state update), so it must read the draft through a ref —
+  // committing the pre-pick draft is what made a ticket-only row look like it
+  // "required a project" (client feedback #5, #7).
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
 
   const [confirm, setConfirm] = useState<
     { message: string; onConfirm: () => void; onCancel?: (() => void) | undefined } | null
@@ -228,7 +238,17 @@ export function ReportScreen() {
       }
       onFail?.();
       if (err instanceof ApiError && err.code === 'unresolved') {
-        toast.show(err.message, 'error');
+        // Name the fields that failed to resolve — a bare "invalid input" left
+        // users stuck with no idea what to correct (client feedback #7).
+        const un = (err.details as unknown as { unresolved?: string[] } | undefined)?.unresolved ?? [];
+        const labels: Record<string, string> = {
+          emp: t('aria.employee'),
+          proj: t('aria.project'),
+          dept: t('aria.department'),
+          fix: t('aria.repairNo'),
+        };
+        const fields = un.map((f) => labels[f] ?? f).join(', ');
+        toast.show(fields ? t('report.notIdentifiedIn', { fields }) : err.message, 'error');
         return;
       }
       toast.show(err instanceof Error ? err.message : t('common.saveFailed'), 'error');
@@ -236,16 +256,24 @@ export function ReportScreen() {
   }
 
   const commitDraft = () => {
-    const complete = draft.empText.trim() && (draft.projText.trim() || draft.fixText.trim()) && draft.hours.trim();
+    const d = draftRef.current;
+    // A half-edited date input yields '' — sent as-is the server answers a bare
+    // "invalid input" and the user is stuck (client feedback #7, the red toast
+    // in the screenshot). Catch it here with a message that names the problem.
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d.date)) {
+      toast.show(t('report.badDate'), 'error');
+      return;
+    }
+    const complete = d.empText.trim() && (d.projText.trim() || d.fixText.trim()) && d.hours.trim();
     if (!complete) {
       toast.show(t('report.required'), 'error');
       return;
     }
     void writeWithOverTarget(
-      (ack) => mut.create.mutateAsync({ ...toInput(draft), acknowledgeOverTarget: ack }),
+      (ack) => mut.create.mutateAsync({ ...toInput(d), acknowledgeOverTarget: ack }),
       () => {
         toast.show(t('common.added'));
-        setDraft(emptyDraft(draft.date));
+        setDraft(emptyDraft(d.date));
         // Return focus to the top of the fresh draft row.
         setTimeout(() => {
           document
@@ -258,6 +286,11 @@ export function ReportScreen() {
 
   const saveExisting = (m: GridModel, onError: () => void) => {
     if (m.id == null) return;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(m.date)) {
+      onError();
+      toast.show(t('report.badDate'), 'error');
+      return;
+    }
     void writeWithOverTarget(
       (ack) => mut.update.mutateAsync({ id: m.id!, ...toInput(m), acknowledgeOverTarget: ack }),
       () => toast.show(t('common.saved')),
@@ -297,6 +330,13 @@ export function ReportScreen() {
             {showAll ? t('report.showOneDay') : t('report.allDates')}
           </button>
           <div style={{ flex: 1 }} />
+          <a
+            className="btn sm ghost"
+            href={exportUrl('report', showAll ? {} : { date })}
+            download
+          >
+            {t('common.exportExcel')}
+          </a>
           {!showAll && (
             <button className="btn sm grn" onClick={submitDay} disabled={mut.submitDay.isPending}>
               {t('report.submitDay')}
@@ -331,10 +371,12 @@ export function ReportScreen() {
                 <tr>
                   <th style={{ minWidth: 110 }}>{t('report.th.date')}</th>
                   <th style={{ minWidth: 100 }}>{t('report.th.employee')}</th>
+                  {/* Ticket sits right next to Project (client feedback #2) — the
+                      pair is an either/or choice and reads as one. */}
                   <th style={{ minWidth: 130 }}>{t('report.th.project')}</th>
+                  <th style={{ minWidth: 90 }}>{t('report.th.repairNo')}</th>
                   <th style={{ minWidth: 80 }}>{t('report.th.hours')}</th>
                   <th style={{ minWidth: 110 }}>{t('report.th.department')}</th>
-                  <th style={{ minWidth: 90 }}>{t('report.th.repairNo')}</th>
                   <th className="derived-h" style={{ minWidth: 80 }}>{t('report.th.projNo')}</th>
                   <th className="derived-h" style={{ minWidth: 190 }}>{t('report.th.projName')}</th>
                   <th className="derived-h" style={{ minWidth: 70 }}>{t('report.th.empNo')}</th>
@@ -428,6 +470,10 @@ function RowEditor(props: RowProps) {
   const t = useT();
   const isDraft = props.mode === 'draft';
 
+  /** A ticket's display name, shaped like the server's display_proj_name. */
+  const repairName = (n: number, client: string | null | undefined) =>
+    t('report.repairLabel', { n }) + (client ? ` · ${client}` : '');
+
   // Existing rows keep a local editable copy, re-seeded when the server row
   // changes (id + hours + updated key), so an external refetch does not clobber
   // an edit in progress but a real change downstream is picked up.
@@ -480,7 +526,9 @@ function RowEditor(props: RowProps) {
           emp_num: res.employee?.emp_num ?? null,
           emp_name: res.employee?.emp_name ?? '',
           proj_num: res.project?.proj_num ?? null,
-          proj_name: res.project?.proj_name ?? res.repair?.client ?? null,
+          proj_name:
+            res.project?.proj_name ??
+            (res.repair ? repairName(res.repair.fix, res.repair.client) : null),
           dept_num: res.department?.dept_num ?? null,
           fix: res.repair?.fix ?? null,
           unresolved: res.unresolved,
@@ -513,6 +561,14 @@ function RowEditor(props: RowProps) {
   const projMiss = model.unresolved.includes('proj');
   const projName = model.proj_name ?? (model.fix != null ? t('report.repairLabel', { n: model.fix }) : '');
   const status = props.statusOf(model.emp_num);
+
+  // Exactly one of project / ticket (client feedback #3, #5 — confirms WP §4.5):
+  // filling either locks the other, and keyboard traversal skips the locked cell.
+  // A legacy row that somehow has both stays fully editable so it can be fixed.
+  const projFilled = model.projText.trim() !== '';
+  const fixFilled = model.fixText.trim() !== '';
+  const projDisabled = fixFilled && !projFilled;
+  const fixDisabled = projFilled && !fixFilled;
 
   return (
     <tr className={isDraft ? 'draft' : ''}>
@@ -549,9 +605,10 @@ function RowEditor(props: RowProps) {
         ariaLabel={t('aria.employee')}
       />
 
-      {/* Project (autocomplete) */}
+      {/* Project (autocomplete) — locked while a ticket is chosen */}
       <AutocompleteCell<Project>
         value={model.projText}
+        disabled={projDisabled}
         search={projSuggest}
         onType={(text) => update({ projText: text, proj_num: null, proj_name: null })}
         onPick={(p) =>
@@ -570,6 +627,35 @@ function RowEditor(props: RowProps) {
         ariaLabel={t('aria.project')}
       />
 
+      {/* Repair ticket (autocomplete) — right next to Project (feedback #2),
+          locked while a project is chosen */}
+      <AutocompleteCell<Repair>
+        value={model.fixText}
+        disabled={fixDisabled}
+        search={fixSuggest}
+        onType={(text) =>
+          update({
+            fixText: text,
+            fix: null,
+            proj_name: model.proj_num != null ? model.proj_name : null,
+          })
+        }
+        onPick={(r) =>
+          update({
+            fixText: String(r.fix),
+            fix: r.fix,
+            proj_name: repairName(r.fix, r.client),
+            unresolved: model.unresolved.filter((u) => u !== 'fix'),
+          })
+        }
+        onEnterEnd={onEnterEnd}
+        onBlur={() => {
+          reconcile();
+          saveIfExisting();
+        }}
+        ariaLabel={t('aria.repairNo')}
+      />
+
       {/* Hours */}
       <td className="num">
         <input
@@ -583,7 +669,7 @@ function RowEditor(props: RowProps) {
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
               e.preventDefault();
-              const inputs = [...(e.currentTarget.closest('tr')?.querySelectorAll<HTMLElement>('[data-grid-input]') ?? [])];
+              const inputs = [...(e.currentTarget.closest('tr')?.querySelectorAll<HTMLElement>('[data-grid-input]:not([disabled])') ?? [])];
               const i = inputs.indexOf(e.currentTarget);
               const next = inputs[i + 1];
               if (next) next.focus();
@@ -605,20 +691,6 @@ function RowEditor(props: RowProps) {
           saveIfExisting();
         }}
         ariaLabel={t('aria.department')}
-      />
-
-      {/* Repair (autocomplete) */}
-      <AutocompleteCell<Repair>
-        value={model.fixText}
-        search={fixSuggest}
-        onType={(text) => update({ fixText: text, fix: null })}
-        onPick={(r) => update({ fixText: String(r.fix), fix: r.fix })}
-        onEnterEnd={onEnterEnd}
-        onBlur={() => {
-          reconcile();
-          saveIfExisting();
-        }}
-        ariaLabel={t('aria.repairNo')}
       />
 
       {/* Derived */}
