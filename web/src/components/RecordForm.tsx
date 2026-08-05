@@ -5,7 +5,7 @@ import { useT } from '../i18n/index.tsx';
 export interface Field {
   key: string;
   label: string;
-  type?: 'text' | 'number' | 'date' | 'bool' | 'select';
+  type?: 'text' | 'number' | 'date' | 'bool' | 'select' | 'password';
   options?: { value: string; label: string }[];
   /** Shown under the input — used for the "leave empty for the default" hints. */
   hint?: string;
@@ -133,7 +133,16 @@ export function RecordForm({
               </select>
             ) : (
               <input
-                type={f.type === 'number' ? 'number' : f.type === 'date' ? 'date' : 'text'}
+                type={
+                  f.type === 'number'
+                    ? 'number'
+                    : f.type === 'date'
+                      ? 'date'
+                      : f.type === 'password'
+                        ? 'password'
+                        : 'text'
+                }
+                autoComplete={f.type === 'password' ? 'new-password' : undefined}
                 step={f.type === 'number' ? 'any' : undefined}
                 value={String(values[f.key] ?? '')}
                 onChange={(e) => set(f.key, e.target.value)}

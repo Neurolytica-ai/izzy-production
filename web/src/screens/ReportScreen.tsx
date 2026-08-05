@@ -166,6 +166,12 @@ export function ReportScreen() {
   const draftRef = useRef(draft);
   draftRef.current = draft;
 
+  // The draft is only cleared in the create's onDone, which runs *after* the
+  // awaited round-trip. A second Enter (or a click-then-Enter) in that window
+  // used to fire a second identical POST and persist a duplicate row (client
+  // feedback round 2 #1). This latch blocks re-entry until the write settles.
+  const committing = useRef(false);
+
   const [confirm, setConfirm] = useState<
     { message: string; onConfirm: () => void; onCancel?: (() => void) | undefined } | null
   >(null);
@@ -256,6 +262,7 @@ export function ReportScreen() {
   }
 
   const commitDraft = () => {
+    if (committing.current) return; // a create is already in flight — do not double-submit
     const d = draftRef.current;
     // A half-edited date input yields '' — sent as-is the server answers a bare
     // "invalid input" and the user is stuck (client feedback #7, the red toast
@@ -269,9 +276,11 @@ export function ReportScreen() {
       toast.show(t('report.required'), 'error');
       return;
     }
+    committing.current = true;
     void writeWithOverTarget(
       (ack) => mut.create.mutateAsync({ ...toInput(d), acknowledgeOverTarget: ack }),
       () => {
+        committing.current = false;
         toast.show(t('common.added'));
         setDraft(emptyDraft(d.date));
         // Return focus to the top of the fresh draft row.
@@ -280,6 +289,11 @@ export function ReportScreen() {
             .querySelector<HTMLInputElement>('tr.draft [data-grid-input]')
             ?.focus();
         }, 20);
+      },
+      // Released on any non-persisting outcome (error, or a declined over-target
+      // prompt) so the user can correct and retry.
+      () => {
+        committing.current = false;
       }
     );
   };
@@ -470,9 +484,14 @@ function RowEditor(props: RowProps) {
   const t = useT();
   const isDraft = props.mode === 'draft';
 
-  /** A ticket's display name, shaped like the server's display_proj_name. */
-  const repairName = (n: number, client: string | null | undefined) =>
-    t('report.repairLabel', { n }) + (client ? ` · ${client}` : '');
+  /** A ticket's display name, shaped like the server's display_proj_name: the
+   *  number, then the client, then the ticket's own date — so the grid shows the
+   *  same "17033 · באסם דאבח · 2026-07-12" the dropdown does, not just the number
+   *  (client feedback round 2 #4). */
+  const repairName = (n: number, client: string | null | undefined, date?: string | null) =>
+    t('report.repairLabel', { n }) +
+    (client ? ` · ${client}` : '') +
+    (date ? ` · ${date}` : '');
 
   // Existing rows keep a local editable copy, re-seeded when the server row
   // changes (id + hours + updated key), so an external refetch does not clobber
@@ -528,7 +547,7 @@ function RowEditor(props: RowProps) {
           proj_num: res.project?.proj_num ?? null,
           proj_name:
             res.project?.proj_name ??
-            (res.repair ? repairName(res.repair.fix, res.repair.client) : null),
+            (res.repair ? repairName(res.repair.fix, res.repair.client, res.repair.date) : null),
           dept_num: res.department?.dept_num ?? null,
           fix: res.repair?.fix ?? null,
           unresolved: res.unresolved,
@@ -644,7 +663,7 @@ function RowEditor(props: RowProps) {
           update({
             fixText: String(r.fix),
             fix: r.fix,
-            proj_name: repairName(r.fix, r.client),
+            proj_name: repairName(r.fix, r.client, r.date),
             unresolved: model.unresolved.filter((u) => u !== 'fix'),
           })
         }

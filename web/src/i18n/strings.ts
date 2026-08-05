@@ -62,6 +62,7 @@ export const STRINGS = {
   'tab.dash': { en: '📊 Dashboard', he: '📊 דאשבורד' },
   'tab.import': { en: '⬆️ Excel Import', he: '⬆️ טעינת אקסלים' },
   'tab.master': { en: '🗂️ Master Data', he: '🗂️ נתוני מאסטר' },
+  'tab.users': { en: '👥 Users', he: '👥 משתמשים' },
   'tab.log': { en: '🧾 Activity Log', he: '🧾 יומן פעולות' },
 
   // ---- login -------------------------------------------------------------
@@ -362,13 +363,60 @@ export const STRINGS = {
   'log.empty': { en: 'No log entries match', he: 'אין רשומות יומן תואמות' },
   'log.system': { en: 'system', he: 'מערכת' },
 
+  // ---- users (admin account management) ---------------------------------
+  'entity.user': { en: 'user', he: 'משתמש' },
+  'role.reporter': { en: 'Reporter', he: 'מדווח' },
+  'role.manager': { en: 'Manager', he: 'מנהל' },
+  'role.admin': { en: 'Admin', he: 'מנהל מערכת' },
+  'users.title': { en: 'Users', he: 'משתמשים' },
+  'users.subtitle': {
+    en: 'Create and manage the people who can sign in. Admin only.',
+    he: 'יצירה וניהול של המשתמשים שיכולים להתחבר. למנהל מערכת בלבד.',
+  },
+  'users.add': { en: 'Add user', he: 'הוספת משתמש' },
+  'users.addTitle': { en: 'Add user', he: 'הוספת משתמש' },
+  'users.editTitle': { en: 'Edit user — {name}', he: 'עריכת משתמש — {name}' },
+  'users.none': { en: 'No users yet', he: 'אין עדיין משתמשים' },
+  'users.resetPassword': { en: 'Reset password', he: 'איפוס סיסמה' },
+  'users.resetTitle': { en: 'Reset password — {name}', he: 'איפוס סיסמה — {name}' },
+  'users.newPassword': { en: 'New password', he: 'סיסמה חדשה' },
+  'users.passwordReset': { en: 'Password reset', he: 'הסיסמה אופסה' },
+  'users.deleteConfirm': {
+    en: 'Delete user {name}? Their history stays; they can no longer sign in.',
+    he: 'למחוק את המשתמש {name}? ההיסטוריה נשמרת; הוא לא יוכל להתחבר יותר.',
+  },
+  'users.never': { en: 'never', he: 'מעולם לא' },
+  'th.username': { en: 'Username', he: 'שם משתמש' },
+  'th.displayName': { en: 'Display name', he: 'שם לתצוגה' },
+  'th.role': { en: 'Role', he: 'תפקיד' },
+  'th.linkedEmployee': { en: 'Linked employee #', he: 'מס׳ עובד מקושר' },
+  'th.status': { en: 'Status', he: 'סטטוס' },
+  'th.lastLogin': { en: 'Last sign-in', he: 'התחברות אחרונה' },
+  'users.active': { en: 'Active', he: 'פעיל' },
+  'users.inactive': { en: 'Disabled', he: 'מושבת' },
+  'field.user.username': { en: 'Username', he: 'שם משתמש' },
+  'field.user.usernameHint': {
+    en: 'At least 3 characters, no spaces. Cannot be changed later.',
+    he: 'לפחות 3 תווים, ללא רווחים. לא ניתן לשינוי לאחר מכן.',
+  },
+  'field.user.password': { en: 'Password', he: 'סיסמה' },
+  'field.user.passwordHint': { en: 'At least 8 characters.', he: 'לפחות 8 תווים.' },
+  'field.user.displayName': { en: 'Display name', he: 'שם לתצוגה' },
+  'field.user.role': { en: 'Role', he: 'תפקיד' },
+  'field.user.empNum': { en: 'Linked employee number', he: 'מספר עובד מקושר' },
+  'field.user.empNumHint': {
+    en: 'Optional — ties this login to an employee record.',
+    he: 'לא חובה — מקשר את ההתחברות לרשומת עובד.',
+  },
+  'field.user.active': { en: 'Active', he: 'פעיל' },
+
   // ---- placeholder (unbuilt tabs) ---------------------------------------
   'placeholder.notBuilt': { en: 'Not built yet — Phase {phase}: {what}.', he: 'טרם נבנה — שלב {phase}: {what}.' },
   'placeholder.what.2': { en: 'Reports API and the hours-entry grid', he: 'ממשק הדיווחים וטבלת הזנת השעות' },
   'placeholder.what.3': { en: 'Server-side Excel import and export', he: 'ייבוא וייצוא אקסל בצד השרת' },
   'placeholder.what.4': {
-    en: 'Attendance cross-check, dashboard and activity log',
-    he: 'הצלבת נוכחות, דאשבורד ויומן פעולות',
+    en: 'Attendance cross-check and dashboard',
+    he: 'הצלבת נוכחות ודאשבורד',
   },
   'placeholder.whatDefault': { en: 'in progress', he: 'בתהליך' },
   'placeholder.behind': {

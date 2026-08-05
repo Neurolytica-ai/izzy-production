@@ -8,11 +8,10 @@ import { ArchiveScreen } from './screens/ArchiveScreen.tsx';
 import { LoginScreen } from './screens/LoginScreen.tsx';
 import { LogScreen } from './screens/LogScreen.tsx';
 import { ImportScreen } from './screens/ImportScreen.tsx';
-import { CoverageScreen } from './screens/CoverageScreen.tsx';
-import { DashScreen } from './screens/DashScreen.tsx';
 import { MasterScreen } from './screens/MasterScreen.tsx';
 import { Placeholder } from './screens/Placeholder.tsx';
 import { ReportScreen } from './screens/ReportScreen.tsx';
+import { UsersScreen } from './screens/UsersScreen.tsx';
 
 /**
  * The seven tabs from the prototype, in its order. Kept even where the screen is
@@ -22,12 +21,21 @@ import { ReportScreen } from './screens/ReportScreen.tsx';
 const TABS = [
   { id: 'report', labelKey: 'tab.report', phase: 2 },
   { id: 'archive', labelKey: 'tab.archive', phase: 2 },
+  // Coverage + dashboard are reverted to their "later phase" placeholders at the
+  // client's request (feedback round 2 #3): the Phase-4 screens still exist and
+  // are tested, but are not shown yet. Re-enabling is one line each below.
   { id: 'coverage', labelKey: 'tab.coverage', phase: 4 },
   { id: 'dash', labelKey: 'tab.dash', phase: 4 },
   { id: 'import', labelKey: 'tab.import', phase: 3 },
   { id: 'master', labelKey: 'tab.master', phase: 1 },
+  { id: 'users', labelKey: 'tab.users', phase: 1, adminOnly: true },
   { id: 'log', labelKey: 'tab.log', phase: 4 },
-] as const satisfies readonly { id: string; labelKey: StringKey; phase: number }[];
+] as const satisfies readonly {
+  id: string;
+  labelKey: StringKey;
+  phase: number;
+  adminOnly?: boolean;
+}[];
 
 export type TabId = (typeof TABS)[number]['id'];
 const TAB_IDS = TABS.map((tab) => tab.id);
@@ -89,7 +97,9 @@ export function App() {
       </header>
 
       <nav>
-        {TABS.map((tab_) => (
+        {TABS.filter(
+          (tab_) => !('adminOnly' in tab_ && tab_.adminOnly) || user.role === 'admin'
+        ).map((tab_) => (
           <button
             key={tab_.id}
             className={tab_.id === tab ? 'active' : ''}
@@ -107,15 +117,15 @@ export function App() {
           <ArchiveScreen role={user.role} />
         ) : tab === 'master' ? (
           <MasterScreen role={user.role} />
+        ) : tab === 'users' && user.role === 'admin' ? (
+          <UsersScreen />
         ) : tab === 'log' ? (
           <LogScreen role={user.role} />
         ) : tab === 'import' ? (
           <ImportScreen role={user.role} />
-        ) : tab === 'coverage' ? (
-          <CoverageScreen role={user.role} />
-        ) : tab === 'dash' ? (
-          <DashScreen />
         ) : (
+          // coverage + dash (feedback round 2 #3) and any not-yet-built tab land
+          // on the honest "later phase" placeholder.
           <Placeholder title={t(current.labelKey)} phase={current.phase} />
         )}
       </main>

@@ -104,8 +104,12 @@ async function requestUpload<T>(path: string, file: File): Promise<T> {
 
 /** Unwraps the standard `{ data }` envelope — the shape almost every endpoint returns. */
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const raw = await requestRaw<Envelope<T>>(method, path, body);
-  return raw.data;
+  const raw = await requestRaw<Envelope<T> | undefined>(method, path, body);
+  // A 204 No Content (every DELETE, and password reset) parses to `undefined`;
+  // reaching for `.data` on it threw "Cannot read properties of undefined
+  // (reading 'data')" and surfaced as a spurious error toast even though the
+  // write had already succeeded on the server (client feedback round 2 #2).
+  return raw?.data as T;
 }
 
 const get = <T>(path: string) => request<T>('GET', path);
