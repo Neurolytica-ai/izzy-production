@@ -70,9 +70,13 @@ export function App() {
     try {
       await api.auth.logout();
     } finally {
-      // Clear everything: another user may sign in on this machine, and stale
-      // master data in the cache would be the least of it.
-      qc.clear();
+      // A full reload, not qc.clear(): clearing the cache never notifies the
+      // mounted useMe observer (removing observed queries is undefined
+      // behavior in React Query), so the shell used to stay up until a manual
+      // refresh. The reload also drops every trace of the signed-out user
+      // from memory — another user may sign in on this machine — and lands on
+      // the login screen through the normal boot path (me → 401).
+      window.location.reload();
     }
   };
 
