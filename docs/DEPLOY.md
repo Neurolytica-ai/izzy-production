@@ -228,7 +228,12 @@ When there's new code to ship:
 cd ~/izzy-production
 git pull
 docker compose up -d --build      # rebuilds app + refreshes the front end, restarts
+docker compose exec nginx nginx -s reload
 ```
+
+The nginx reload is required: recreating `app` gives it a new container IP, and a
+long-running nginx keeps the old one resolved — every API call then returns
+**502 Bad Gateway** until nginx re-resolves the upstream (seen live 2026-08-13).
 
 `nginx/active.conf` is gitignored, so `git pull` never disturbs your HTTPS config.
 
