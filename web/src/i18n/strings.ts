@@ -73,6 +73,11 @@ export const STRINGS = {
   'login.signIn': { en: 'Sign in', he: 'התחבר' },
   'login.signingIn': { en: 'Signing in…', he: 'מתחבר…' },
   'login.failed': { en: 'Sign-in failed.', he: 'ההתחברות נכשלה.' },
+  'login.forgot': { en: 'Forgot password?', he: 'שכחת סיסמה?' },
+  'login.forgotHint': {
+    en: 'To reset your password, contact your system administrator.',
+    he: 'לאיפוס הסיסמה, פנה למנהל המערכת.',
+  },
 
   // ---- master: KPIs ------------------------------------------------------
   'master.kpi.activeEmployees': { en: 'Active employees', he: 'עובדים פעילים' },

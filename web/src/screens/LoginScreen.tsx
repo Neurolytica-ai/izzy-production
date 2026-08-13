@@ -24,6 +24,7 @@ export function LoginScreen({ onSignedIn, error }: Props) {
   const passwordRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
+  const [showForgot, setShowForgot] = useState(false);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -96,6 +97,27 @@ export function LoginScreen({ onSignedIn, error }: Props) {
         <button className="btn" type="submit" disabled={busy} style={{ width: '100%' }}>
           {busy ? t('login.signingIn') : t('login.signIn')}
         </button>
+
+        <button
+          type="button"
+          className="mini"
+          onClick={() => setShowForgot((v) => !v)}
+          style={{
+            background: 'none',
+            border: 'none',
+            padding: 0,
+            marginTop: 12,
+            cursor: 'pointer',
+            textDecoration: 'underline',
+          }}
+        >
+          {t('login.forgot')}
+        </button>
+        {showForgot && (
+          <div className="mini" style={{ marginTop: 6 }}>
+            {t('login.forgotHint')}
+          </div>
+        )}
 
         {failure && (
           <div className="pill r" style={{ display: 'block', marginTop: 14, padding: '8px 12px' }}>

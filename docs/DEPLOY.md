@@ -234,7 +234,34 @@ docker compose up -d --build      # rebuilds app + refreshes the front end, rest
 
 ---
 
+## Password resets
+
+Regular users: an admin resets their password in the app's **Users** tab.
+
+If the **admin's own** password is lost, no one can do that from the UI — reset it
+from any machine with this repo and the production `DATABASE_URL` (credentials
+sheet; local dev and prod share the same Supabase database):
+
+```bash
+DATABASE_URL='<prod pooler URL>' npm run user:create -- --username admin --reset-password
+```
+
+A new password is generated and printed once. Hand it over on a trusted channel
+and have it changed after first login.
+
+---
+
 ## Troubleshooting
+
+**Every login fails with "שגיאת מערכת" (system error) and `/api/ready` returns 503**
+— the Supabase project is paused. The free tier auto-pauses a project after ~1 week
+without database activity, and while paused the pooler rejects connections with
+`tenant/user ... not found` and the project's `*.supabase.co` DNS stops resolving.
+Restore it in the Supabase dashboard (project page → **Restore project**, takes
+1–3 minutes), then confirm `/api/ready` returns 200. A keep-alive cron on this
+server (`crontab -l` as `neurolytica`, hits `/api/ready` every 6 hours — installed
+2026-08-13) should prevent recurrence; if this happens again, check that cron
+is still present. The durable fix is Supabase Pro or self-hosted Postgres.
 
 **`docker compose ps` shows `app` restarting** — bad `.env`. Check logs:
 ```bash
