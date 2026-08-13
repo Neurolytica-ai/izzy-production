@@ -78,6 +78,28 @@ export const STRINGS = {
     en: 'To reset your password, contact your system administrator.',
     he: 'לאיפוס הסיסמה, פנה למנהל המערכת.',
   },
+  'login.forgotIntro': {
+    en: 'Enter your username above, and a reset link will be emailed to the address on your account.',
+    he: 'הזן את שם המשתמש למעלה, וקישור לאיפוס יישלח למייל המשויך לחשבון.',
+  },
+  'login.forgotSend': { en: 'Send reset link', he: 'שלח קישור איפוס' },
+  'login.forgotSending': { en: 'Sending…', he: 'שולח…' },
+  'login.forgotSent': {
+    en: 'If this account has an email address on file, a reset link was sent to it.',
+    he: 'אם לחשבון זה משויכת כתובת מייל, נשלח אליה קישור איפוס.',
+  },
+
+  // ---- password reset (from the emailed link) ----------------------------
+  'reset.title': { en: 'Choose a new password', he: 'בחירת סיסמה חדשה' },
+  'reset.newPassword': { en: 'New password', he: 'סיסמה חדשה' },
+  'reset.confirmPassword': { en: 'Confirm password', he: 'אימות סיסמה' },
+  'reset.mismatch': { en: 'The passwords do not match.', he: 'הסיסמאות אינן תואמות.' },
+  'reset.submit': { en: 'Set new password', he: 'קבע סיסמה חדשה' },
+  'reset.success': {
+    en: 'Password updated. You can sign in with it now.',
+    he: 'הסיסמה עודכנה. אפשר להתחבר איתה עכשיו.',
+  },
+  'reset.backToLogin': { en: 'Back to sign-in', he: 'חזרה להתחברות' },
 
   // ---- master: KPIs ------------------------------------------------------
   'master.kpi.activeEmployees': { en: 'Active employees', he: 'עובדים פעילים' },
@@ -397,6 +419,7 @@ export const STRINGS = {
   'th.linkedEmployee': { en: 'Linked employee #', he: 'מס׳ עובד מקושר' },
   'th.status': { en: 'Status', he: 'סטטוס' },
   'th.lastLogin': { en: 'Last sign-in', he: 'התחברות אחרונה' },
+  'th.email': { en: 'Email', he: 'מייל' },
   'users.active': { en: 'Active', he: 'פעיל' },
   'users.inactive': { en: 'Disabled', he: 'מושבת' },
   'field.user.username': { en: 'Username', he: 'שם משתמש' },
@@ -412,6 +435,11 @@ export const STRINGS = {
   'field.user.empNumHint': {
     en: 'Optional — ties this login to an employee record.',
     he: 'לא חובה — מקשר את ההתחברות לרשומת עובד.',
+  },
+  'field.user.email': { en: 'Email', he: 'מייל' },
+  'field.user.emailHint': {
+    en: 'Optional — password-reset links are sent here.',
+    he: 'לא חובה — קישורי איפוס סיסמה נשלחים לכתובת זו.',
   },
   'field.user.active': { en: 'Active', he: 'פעיל' },
 

@@ -19,12 +19,23 @@ export const usersRouter = Router();
 usersRouter.use(requireRole(...ADMIN_ONLY));
 
 /** Columns safe to return. password_hash is never among them. */
-const SAFE = 'id, username, display_name, role, emp_num, active, last_login_at, created_at';
+const SAFE = 'id, username, display_name, role, emp_num, email, active, last_login_at, created_at';
 
 const password = z
   .string()
   .min(MIN_PASSWORD_LENGTH, tf('field.passwordTooShort', { n: MIN_PASSWORD_LENGTH }))
   .max(200);
+
+/**
+ * Optional; empty string or null clears it. Reset links go here (auth /forgot).
+ * undefined must survive to the end: the PUT handler drops undefined fields,
+ * so an update that never mentions email must not silently erase it.
+ */
+const email = z
+  .union([z.string(), z.null(), z.undefined()])
+  .transform((v) => (typeof v === 'string' ? v.trim() : v))
+  .refine((v) => !v || (/^\S+@\S+\.\S+$/.test(v) && v.length <= 200), t('field.emailInvalid'))
+  .transform((v) => (v === undefined ? undefined : v ? v : null));
 
 const createSchema = z.object({
   username: z
@@ -41,6 +52,7 @@ const createSchema = z.object({
   display_name: z.string().transform((s) => s.trim()).pipe(z.string().min(1).max(120)),
   role: z.enum(['reporter', 'manager', 'admin']).default('reporter'),
   emp_num: z.coerce.number().int().positive().nullish().transform((v) => v ?? null),
+  email: email.transform((v) => v ?? null),
   active: z.coerce.boolean().default(true),
 });
 
@@ -48,6 +60,7 @@ const updateSchema = z.object({
   display_name: z.string().transform((s) => s.trim()).pipe(z.string().min(1).max(120)).optional(),
   role: z.enum(['reporter', 'manager', 'admin']).optional(),
   emp_num: z.coerce.number().int().positive().nullish().transform((v) => v ?? null).optional(),
+  email,
   active: z.coerce.boolean().optional(),
 });
 
@@ -69,9 +82,9 @@ usersRouter.post('/', async (req, res) => {
 
   const row = await withTransaction(async (client) => {
     const inserted = await client.query(
-      `INSERT INTO users (username, password_hash, display_name, role, emp_num, active)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING ${SAFE}`,
-      [input.username, hash, input.display_name, input.role, input.emp_num, input.active]
+      `INSERT INTO users (username, password_hash, display_name, role, emp_num, email, active)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING ${SAFE}`,
+      [input.username, hash, input.display_name, input.role, input.emp_num, input.email, input.active]
     );
     const created = inserted.rows[0]!;
     await logWith(client, {

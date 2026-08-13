@@ -9,6 +9,7 @@ import { config } from './lib/config.ts';
 import { errorHandler, notFound } from './lib/errors.ts';
 import { requireAuth } from './middleware/auth.ts';
 import { healthRouter } from './routes/health.ts';
+import { metaPublicRouter } from './routes/meta.ts';
 import { authRouter } from './routes/auth.ts';
 import { usersRouter } from './routes/users.ts';
 import { masterRouter } from './routes/master.ts';
@@ -59,9 +60,11 @@ export function createApp() {
     });
   }
 
-  // Public: health checks and login.
+  // Public: health checks, login, and the presentation-hints config (the
+  // login screen reads it before any session exists).
   app.use('/api', healthRouter);
   app.use('/api/auth', authRouter);
+  app.use('/api/meta', metaPublicRouter);
 
   // Everything below requires a session. WP §8: permissions are enforced on the
   // server for every endpoint, never by hiding a button.

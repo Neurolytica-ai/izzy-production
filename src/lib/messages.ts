@@ -54,6 +54,36 @@ export const MSG = {
     en: 'You do not have permission for this action',
     he: 'אין הרשאה לפעולה זו',
   },
+  'auth.resetUnavailable': {
+    en: 'Password reset by email is not available. Contact your system administrator.',
+    he: 'איפוס סיסמה במייל אינו זמין. פנה למנהל המערכת.',
+  },
+  'auth.resetInvalid': {
+    en: 'This reset link is invalid or has expired. Request a new one from the sign-in screen.',
+    he: 'קישור האיפוס אינו תקין או שפג תוקפו. יש לבקש קישור חדש ממסך ההתחברות.',
+  },
+  'field.emailInvalid': {
+    en: 'Invalid email address',
+    he: 'כתובת מייל לא תקינה',
+  },
+
+  // ---- outbound email (password reset) ------------------------------------
+  'mail.resetSubject': {
+    en: 'Password reset — Izzy Yogev production system',
+    he: 'איפוס סיסמה — מערכת הייצור איזי יוגב',
+  },
+  'mail.resetIntro': {
+    en: 'Hello {name}, a password reset was requested for your account ({username}).',
+    he: 'שלום {name}, התקבלה בקשה לאיפוס הסיסמה של החשבון שלך ({username}).',
+  },
+  'mail.resetAction': {
+    en: 'To choose a new password, open this link (valid for 60 minutes):',
+    he: 'לבחירת סיסמה חדשה יש לפתוח את הקישור הבא (בתוקף ל־60 דקות):',
+  },
+  'mail.resetIgnore': {
+    en: 'If you did not request this, you can ignore this message — your password has not changed.',
+    he: 'אם לא ביקשת איפוס, אפשר להתעלם מהודעה זו — הסיסמה לא שונתה.',
+  },
 
   // ---- generic request / record -----------------------------------------
   'error.notFound': {
@@ -291,6 +321,7 @@ export const ACTION = {
   userEdit: 'user.edit',
   userDelete: 'user.delete',
   passwordReset: 'password.reset',
+  passwordResetRequest: 'password.reset.request',
   logCleared: 'log.cleared',
 } as const;
 
@@ -314,6 +345,7 @@ const ACTION_LABELS: Record<ActionCode, Entry> = {
   'user.edit': { en: 'User edited', he: 'עריכת משתמש' },
   'user.delete': { en: 'User deleted', he: 'מחיקת משתמש' },
   'password.reset': { en: 'Password reset', he: 'איפוס סיסמה' },
+  'password.reset.request': { en: 'Password reset requested', he: 'בקשת איפוס סיסמה' },
   'log.cleared': { en: 'Activity log cleared', he: 'ניקוי יומן' },
 };
 

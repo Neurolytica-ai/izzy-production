@@ -11,6 +11,7 @@ import { ImportScreen } from './screens/ImportScreen.tsx';
 import { MasterScreen } from './screens/MasterScreen.tsx';
 import { Placeholder } from './screens/Placeholder.tsx';
 import { ReportScreen } from './screens/ReportScreen.tsx';
+import { ResetScreen } from './screens/ResetScreen.tsx';
 import { UsersScreen } from './screens/UsersScreen.tsx';
 
 /**
@@ -40,6 +41,15 @@ const TABS = [
 export type TabId = (typeof TABS)[number]['id'];
 const TAB_IDS = TABS.map((tab) => tab.id);
 
+/**
+ * Captured once at module load, before any effect can rewrite the hash: a
+ * #reset=<token> URL comes from a password-reset email and takes over the
+ * whole screen — no session involved.
+ */
+const RESET_TOKEN = window.location.hash.startsWith('#reset=')
+  ? window.location.hash.slice('#reset='.length)
+  : null;
+
 export function App() {
   const t = useT();
   const me = useMe();
@@ -47,6 +57,12 @@ export function App() {
   const [tab, setTab] = useHashTab<TabId>(TAB_IDS as readonly TabId[], 'master');
 
   const authFailed = me.error instanceof ApiError && me.error.isAuthFailure;
+
+  // Constant for the app's lifetime, so the early return can never reorder
+  // the hooks above across renders.
+  if (RESET_TOKEN) {
+    return <ResetScreen token={RESET_TOKEN} />;
+  }
 
   if (me.isLoading) {
     return <div className="empty" style={{ paddingTop: 60 }}>{t('common.loading')}</div>;

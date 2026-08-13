@@ -192,6 +192,7 @@ export interface UserAccount {
   display_name: string;
   role: Role;
   emp_num: number | null;
+  email: string | null;
   active: boolean;
   last_login_at: string | null;
   created_at: string;
@@ -442,6 +443,8 @@ export interface AppConfig {
   lang: 'en' | 'he';
   dir: 'ltr' | 'rtl';
   sessionTtlHours: number;
+  /** True when the server has SMTP configured — the login screen shows the email-reset form. */
+  passwordReset: boolean;
 }
 
 export interface Vocabulary {
@@ -461,6 +464,9 @@ export const api = {
       post<CurrentUser>('/api/auth/login', { username, password }),
     logout: () => post<void>('/api/auth/logout'),
     me: () => get<CurrentUser>('/api/auth/me'),
+    forgot: (username: string) => post<void>('/api/auth/forgot', { username }),
+    reset: (token: string, password: string) =>
+      post<void>('/api/auth/reset', { token, password }),
   },
 
   meta: {

@@ -29,6 +29,10 @@ export function useHashTab<T extends string>(
   // actually on screen.
   useEffect(() => {
     const raw = window.location.hash.replace(/^#\/?/, '');
+    // A password-reset link owns the hash (#reset=<token> — App.tsx renders
+    // ResetScreen instead of tabs). Rewriting it here would eat the token on
+    // a refresh of that screen.
+    if (raw.startsWith('reset=')) return;
     if (!(valid as readonly string[]).includes(raw)) {
       window.history.replaceState(null, '', `#/${fallback}`);
     }

@@ -31,6 +31,18 @@ const schema = z.object({
     .string()
     .default('')
     .transform((s) => s.split(',').map((x) => x.trim()).filter(Boolean)),
+  /**
+   * Outbound email, used only for self-service password-reset links. All of
+   * these plus APP_BASE_URL must be set for the feature to switch on; while any
+   * are missing the login screen falls back to "contact your administrator".
+   */
+  SMTP_HOST: z.string().default(''),
+  SMTP_PORT: z.coerce.number().int().positive().default(587),
+  SMTP_USER: z.string().default(''),
+  SMTP_PASS: z.string().default(''),
+  SMTP_FROM: z.string().default(''),
+  /** Public origin the emailed reset links point at, e.g. https://srv1859122.hstgr.cloud */
+  APP_BASE_URL: z.string().default(''),
 });
 
 const parsed = schema.safeParse(process.env);
@@ -44,6 +56,14 @@ if (!parsed.success) {
   process.exit(1);
 }
 
+const mailVars = [
+  parsed.data.SMTP_HOST,
+  parsed.data.SMTP_USER,
+  parsed.data.SMTP_PASS,
+  parsed.data.SMTP_FROM,
+  parsed.data.APP_BASE_URL,
+];
+
 export const config = {
   ...parsed.data,
   isProduction: parsed.data.NODE_ENV === 'production',
@@ -51,7 +71,20 @@ export const config = {
   dbSsl: parsed.data.DATABASE_URL.includes('supabase')
     ? { rejectUnauthorized: false }
     : undefined,
+  /** True only when every SMTP_* var and APP_BASE_URL are present. */
+  mailEnabled: mailVars.every(Boolean),
 } as const;
+
+// A half-filled SMTP block means someone meant to enable email reset and
+// mistyped a variable name — the feature silently staying off would be the
+// confusing failure mode, so call it out at boot.
+if (!config.mailEnabled && mailVars.some(Boolean)) {
+  console.warn(
+    '[config] WARNING: partial SMTP configuration — email password reset stays ' +
+      'DISABLED. Set all of SMTP_HOST, SMTP_USER, SMTP_PASS, SMTP_FROM and ' +
+      'APP_BASE_URL to enable it.'
+  );
+}
 
 // A Secure cookie is silently dropped over plain HTTP, so the combination below
 // produces a login that appears to succeed and then immediately forgets you.

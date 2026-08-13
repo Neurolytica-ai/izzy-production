@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import { ApiError, api, type CurrentUser } from '../api/client.ts';
+import { useAppConfig } from '../api/hooks.ts';
 import { useT } from '../i18n/index.tsx';
 
 interface Props {
@@ -20,11 +21,38 @@ let typedUsername = '';
 
 export function LoginScreen({ onSignedIn, error }: Props) {
   const t = useT();
+  // /api/meta/config is public precisely so this screen can read the
+  // passwordReset flag. On any fetch error, fall back to the offline-safe
+  // "contact your administrator" hint.
+  const cfg = useAppConfig();
+  const emailReset = cfg.data?.passwordReset === true;
   const usernameRef = useRef<HTMLInputElement>(null);
   const passwordRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const [showForgot, setShowForgot] = useState(false);
+  const [forgotBusy, setForgotBusy] = useState(false);
+  const [forgotSent, setForgotSent] = useState(false);
+  const [forgotError, setForgotError] = useState<string | null>(null);
+
+  const sendResetLink = async () => {
+    const username = usernameRef.current?.value.trim() ?? '';
+    if (!username) {
+      usernameRef.current?.focus();
+      return;
+    }
+    if (forgotBusy) return;
+    setForgotBusy(true);
+    setForgotError(null);
+    try {
+      await api.auth.forgot(username);
+      setForgotSent(true);
+    } catch (err) {
+      setForgotError(err instanceof ApiError ? err.message : t('common.saveFailed'));
+    } finally {
+      setForgotBusy(false);
+    }
+  };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -113,11 +141,31 @@ export function LoginScreen({ onSignedIn, error }: Props) {
         >
           {t('login.forgot')}
         </button>
-        {showForgot && (
-          <div className="mini" style={{ marginTop: 6 }}>
-            {t('login.forgotHint')}
-          </div>
-        )}
+        {showForgot &&
+          (!emailReset ? (
+            // No SMTP configured on the server — the admin is the reset path.
+            <div className="mini" style={{ marginTop: 6 }}>
+              {t('login.forgotHint')}
+            </div>
+          ) : forgotSent ? (
+            <div className="mini" style={{ marginTop: 6 }}>
+              {t('login.forgotSent')}
+            </div>
+          ) : (
+            <div style={{ marginTop: 6 }}>
+              <div className="mini" style={{ marginBottom: 8 }}>
+                {t('login.forgotIntro')}
+              </div>
+              <button type="button" className="btn sm" disabled={forgotBusy} onClick={sendResetLink}>
+                {forgotBusy ? t('login.forgotSending') : t('login.forgotSend')}
+              </button>
+              {forgotError && (
+                <div className="mini" style={{ color: '#c33', marginTop: 6 }}>
+                  {forgotError}
+                </div>
+              )}
+            </div>
+          ))}
 
         {failure && (
           <div className="pill r" style={{ display: 'block', marginTop: 14, padding: '8px 12px' }}>

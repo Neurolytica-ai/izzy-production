@@ -18,7 +18,14 @@ metaRouter.get('/vocabulary', (_req, res) => {
   res.json({ data: vocabulary() });
 });
 
-metaRouter.get('/config', (_req, res) => {
+/**
+ * Mounted WITHOUT the auth wall: the login screen needs `passwordReset` to
+ * decide between the email-reset form and the contact-an-administrator hint,
+ * and a signed-out user is exactly who is looking at it.
+ */
+export const metaPublicRouter = Router();
+
+metaPublicRouter.get('/config', (_req, res) => {
   // Deliberately narrow — the client needs presentation hints, nothing else.
   // No secrets, no connection strings, no role logic.
   res.json({
@@ -26,6 +33,7 @@ metaRouter.get('/config', (_req, res) => {
       lang: config.UI_LANG,
       dir: config.UI_LANG === 'he' ? 'rtl' : 'ltr',
       sessionTtlHours: config.SESSION_TTL_HOURS,
+      passwordReset: config.mailEnabled,
     },
   });
 });

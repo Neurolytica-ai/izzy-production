@@ -46,6 +46,7 @@ export function UsersScreen() {
     { key: 'display_name', label: t('field.user.displayName'), required: true },
     { key: 'role', label: t('field.user.role'), type: 'select', options: roleOptions },
     { key: 'emp_num', label: t('field.user.empNum'), type: 'number', hint: t('field.user.empNumHint') },
+    { key: 'email', label: t('field.user.email'), hint: t('field.user.emailHint') },
     { key: 'active', label: t('field.user.active'), type: 'bool' },
   ];
   // No username (immutable) and no password (its own action) when editing.
@@ -53,6 +54,7 @@ export function UsersScreen() {
     { key: 'display_name', label: t('field.user.displayName'), required: true },
     { key: 'role', label: t('field.user.role'), type: 'select', options: roleOptions },
     { key: 'emp_num', label: t('field.user.empNum'), type: 'number', hint: t('field.user.empNumHint') },
+    { key: 'email', label: t('field.user.email'), hint: t('field.user.emailHint') },
     { key: 'active', label: t('field.user.active'), type: 'bool' },
   ];
 
@@ -127,6 +129,7 @@ export function UsersScreen() {
                   <th style={{ textAlign: 'start' }}>{t('th.displayName')}</th>
                   <th>{t('th.role')}</th>
                   <th>{t('th.linkedEmployee')}</th>
+                  <th style={{ textAlign: 'start' }}>{t('th.email')}</th>
                   <th>{t('th.status')}</th>
                   <th>{t('th.lastLogin')}</th>
                   <th />
@@ -143,6 +146,9 @@ export function UsersScreen() {
                     </td>
                     <td className="derived">{t(ROLE_LABEL[u.role])}</td>
                     <td className="derived">{u.emp_num ?? '—'}</td>
+                    <td className="derived" style={{ textAlign: 'start' }}>
+                      {u.email ? <span dir="ltr">{u.email}</span> : '—'}
+                    </td>
                     <td className="derived">
                       <span className={`pill ${u.active ? 'g' : 'y'}`}>
                         {u.active ? t('users.active') : t('users.inactive')}
