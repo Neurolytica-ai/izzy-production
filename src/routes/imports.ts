@@ -20,11 +20,21 @@ import multer from 'multer';
 import type { PoolClient } from 'pg';
 import { query, withTransaction } from '../lib/db.ts';
 import { ACTION, logWith } from '../lib/activity.ts';
-import { badRequest } from '../lib/errors.ts';
-import { IMPORT_TYPES, parseImport, type ImportType, type RowError } from '../lib/importers.ts';
+import { badRequest, badRequestText } from '../lib/errors.ts';
+import {
+  IMPORT_TYPES,
+  MASTER_TYPES,
+  WORKBOOK_SHEETS,
+  isMasterType,
+  parseImport,
+  type ImportType,
+  type MasterType,
+  type ParseResult,
+  type RowError,
+} from '../lib/importers.ts';
 import { tf } from '../lib/messages.ts';
 import { MASTER_WRITE, currentUser, requireRole } from '../middleware/auth.ts';
-import { gridFromBuffer } from '../lib/xlsx.ts';
+import { readWorkbook, type Workbook } from '../lib/xlsx.ts';
 
 export const importsRouter = Router();
 
@@ -32,7 +42,9 @@ importsRouter.use(requireRole(...MASTER_WRITE));
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 8 * 1024 * 1024, files: 1 },
+  // The office's hours workbook (דיווח שעות.xlsm) is ~34 MB — it carries a
+  // decade of report history alongside the master lists. nginx allows 64m too.
+  limits: { fileSize: 64 * 1024 * 1024, files: 1 },
 });
 
 /** multer's own errors carry codes, not HTTP statuses — translate them here. */
@@ -72,8 +84,9 @@ function norm(v: unknown): unknown {
   return v;
 }
 
+/** Compares only the fields the file row actually carries (`a`) — an absent field is "keep". */
 function differs(fields: string[], a: Item, b: Item): boolean {
-  return fields.some((f) => norm(a[f]) !== norm(b[f]));
+  return fields.some((f) => f in a && norm(a[f]) !== norm(b[f]));
 }
 
 const toMap = (rows: Item[], key: (r: Item) => string): Map<string, Item> =>
@@ -88,21 +101,26 @@ const SPECS: Record<Exclude<ImportType, 'reports'>, TypeSpec> = {
       toMap(await query('SELECT num, name, nick, active, contractor FROM employees'), (r) =>
         String(r.num)
       ),
+    // `active` is present only when the file has a status column; absent, a
+    // new employee defaults to active and an existing one keeps its flag.
     apply: async (client, it) => {
       await client.query(
         `INSERT INTO employees (num, name, nick, active, contractor)
-         VALUES ($1, $2, $3, $4, $5)
+         VALUES ($1, $2, $3, COALESCE($4::boolean, true), $5)
          ON CONFLICT (num) DO UPDATE
-           SET name = EXCLUDED.name, nick = EXCLUDED.nick,
-               active = EXCLUDED.active, contractor = EXCLUDED.contractor`,
-        [it.num, it.name, it.nick, it.active, it.contractor]
+           SET name = EXCLUDED.name, nick = EXCLUDED.nick, contractor = EXCLUDED.contractor,
+               active = COALESCE($4::boolean, employees.active)`,
+        [it.num, it.name, it.nick, it.active ?? null, it.contractor]
       );
     },
   },
 
   projects: {
     key: (it) => String(it.num),
-    fields: ['name', 'nick', 'client', 'overhead'],
+    // `nick` is written on INSERT only: the workbook's nick column (G) is just
+    // the project number, and must not overwrite the short nicknames the office
+    // types in the hours grid ("נטו", "דבאח"). Edit those in Master Data.
+    fields: ['name', 'client', 'overhead'],
     label: (it) => `${it.name} (${it.num})`,
     load: async () =>
       toMap(await query('SELECT num, name, nick, client, overhead FROM projects'), (r) =>
@@ -113,7 +131,7 @@ const SPECS: Record<Exclude<ImportType, 'reports'>, TypeSpec> = {
         `INSERT INTO projects (num, name, nick, client, overhead)
          VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (num) DO UPDATE
-           SET name = EXCLUDED.name, nick = EXCLUDED.nick,
+           SET name = EXCLUDED.name,
                client = EXCLUDED.client, overhead = EXCLUDED.overhead`,
         [it.num, it.name, it.nick, it.client, it.overhead]
       );
@@ -166,16 +184,16 @@ const SPECS: Record<Exclude<ImportType, 'reports'>, TypeSpec> = {
 
   repairs: {
     key: (it) => String(it.fix),
-    fields: ['client', 'date', 'model'],
+    // The workbook's repairs sheet has number + customer only (A, B): date and
+    // model are left as they are rather than nulled.
+    fields: ['client'],
     label: (it) => `${it.fix} · ${it.client}`,
-    load: async () =>
-      toMap(await query('SELECT fix, client, date, model FROM repairs'), (r) => String(r.fix)),
+    load: async () => toMap(await query('SELECT fix, client FROM repairs'), (r) => String(r.fix)),
     apply: async (client, it) => {
       await client.query(
-        `INSERT INTO repairs (fix, client, date, model) VALUES ($1, $2, $3, $4)
-         ON CONFLICT (fix) DO UPDATE
-           SET client = EXCLUDED.client, date = EXCLUDED.date, model = EXCLUDED.model`,
-        [it.fix, it.client, it.date, it.model]
+        `INSERT INTO repairs (fix, client) VALUES ($1, $2)
+         ON CONFLICT (fix) DO UPDATE SET client = EXCLUDED.client`,
+        [it.fix, it.client]
       );
     },
   },
@@ -222,20 +240,26 @@ function parseType(req: { params: { type?: string } }): ImportType {
   return type;
 }
 
-async function parseAndDiff(type: ImportType, buf: Buffer): Promise<Diff> {
-  let grid;
+/** Master lists read only their named sheets out of the (large) hours workbook. */
+function read(buf: Buffer, sheets?: string[]): Workbook {
   try {
-    grid = gridFromBuffer(buf);
+    return readWorkbook(buf, sheets);
   } catch {
     throw badRequest('import.badFile');
   }
+}
 
-  const parsed = await parseImport(type, grid);
+/** Parse one type; a missing sheet/header is fatal, an empty sheet is left to the caller. */
+async function parseChecked(type: ImportType, wb: Workbook): Promise<ParseResult> {
+  const parsed = await parseImport(type, wb);
+  if (parsed.sheetMissing) throw badRequestText(tf('import.sheetMissing', { sheet: parsed.sheetMissing }));
   if (parsed.headerMissing) throw badRequest('import.headerNotFound');
-  if (parsed.items.length === 0 && parsed.errors.length === 0) {
-    throw badRequest('import.noRows');
-  }
+  return parsed;
+}
 
+const isEmpty = (p: ParseResult) => p.items.length === 0 && p.errors.length === 0;
+
+async function diffParsed(type: ImportType, parsed: ParseResult): Promise<Diff> {
   const errors = [...parsed.errors];
   let items = parsed.items;
 
@@ -276,6 +300,25 @@ async function parseAndDiff(type: ImportType, buf: Buffer): Promise<Diff> {
   }
 
   const spec = SPECS[type];
+
+  // A key that appears twice in one file would be upserted twice (last wins)
+  // and counted twice in the preview. The office's employee sheet has one such
+  // number today — the first occurrence is kept and the repeat reported.
+  {
+    const firstRow = new Map<string, number>();
+    const ok: Item[] = [];
+    for (const it of items) {
+      const k = spec.key(it);
+      const seen = firstRow.get(k);
+      if (seen != null) {
+        errors.push({ row: (it.__row as number) ?? 0, reason: tf('import.dupInFile', { key: k, first: seen }) });
+      } else {
+        firstRow.set(k, (it.__row as number) ?? 0);
+        ok.push(it);
+      }
+    }
+    items = ok;
+  }
 
   if (type === 'standard') {
     // standard.parent is a NOT VALID FK: the pre-existing orphans are tolerated,
@@ -346,26 +389,127 @@ async function parseAndDiff(type: ImportType, buf: Buffer): Promise<Diff> {
   };
 }
 
+async function parseAndDiff(type: ImportType, buf: Buffer): Promise<Diff> {
+  const wb = read(buf, isMasterType(type) ? WORKBOOK_SHEETS : undefined);
+  const parsed = await parseChecked(type, wb);
+  if (isEmpty(parsed)) throw badRequest('import.noRows');
+  return diffParsed(type, parsed);
+}
+
+/** Writes a diff's rows + its activity-log entry, inside the caller's transaction. */
+async function applyDiff(client: PoolClient, type: ImportType, diff: Diff, userId: number) {
+  if (diff.toApply.length === 0) return;
+  if (type === 'reports') {
+    for (const it of diff.toApply) {
+      await client.query(
+        `INSERT INTO reports (date, emp_num, proj_num, fix, dept, hours, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [it.date, it.emp_num, it.proj_num, it.fix, it.dept, it.hours, userId]
+      );
+    }
+  } else {
+    const spec = SPECS[type];
+    for (const it of diff.toApply) await spec.apply(client, it, userId);
+  }
+  // WP §9.2: one activity-log entry per committed import, in the same
+  // transaction as the data it describes.
+  await logWith(client, {
+    userId,
+    action: ACTION.import,
+    detail: `${type} · +${diff.counts.new} ~${diff.counts.updated} =${diff.counts.unchanged} !${diff.counts.invalid}`,
+    entityKey: type,
+  });
+}
+
 const PREVIEW_ROWS_CAP = 200;
 const ERRORS_CAP = 100;
 
-/* ------------------------------------------------------------------ routes */
+const previewOf = (type: ImportType, diff: Diff) => ({
+  type,
+  counts: diff.counts,
+  rows: diff.rows.slice(0, PREVIEW_ROWS_CAP),
+  rowsTruncated: Math.max(0, diff.rows.length - PREVIEW_ROWS_CAP),
+  errors: diff.errors.slice(0, ERRORS_CAP),
+  errorsTruncated: Math.max(0, diff.errors.length - ERRORS_CAP),
+});
+
+/* ------------------------------------------------- whole-workbook import */
+
+/**
+ * The office's hours workbook (דיווח שעות.xlsm) holds all four master lists —
+ * employees, departments, projects, repairs — at fixed sheets/columns
+ * (lib/importers WORKBOOK_LAYOUT). Uploading a ~34 MB file four times, twice
+ * each, is not a workflow, so this pair of routes previews and commits all
+ * four from one upload. Commit is one transaction: all four lists or none.
+ *
+ * Registered before `/:type/...` so `workbook` is not taken for a type name.
+ */
+async function diffWorkbook(buf: Buffer): Promise<{ type: MasterType; diff: Diff }[]> {
+  const wb = read(buf, WORKBOOK_SHEETS);
+  const parsed = await Promise.all(MASTER_TYPES.map((type) => parseChecked(type, wb)));
+  if (parsed.every(isEmpty)) throw badRequest('import.noRows');
+  const out: { type: MasterType; diff: Diff }[] = [];
+  for (let i = 0; i < MASTER_TYPES.length; i++) {
+    out.push({ type: MASTER_TYPES[i]!, diff: await diffParsed(MASTER_TYPES[i]!, parsed[i]!) });
+  }
+  return out;
+}
+
+const sumCounts = (sections: { diff: Diff }[]): Diff['counts'] =>
+  sections.reduce(
+    (a, { diff: { counts: c } }) => ({
+      new: a.new + c.new,
+      updated: a.updated + c.updated,
+      unchanged: a.unchanged + c.unchanged,
+      invalid: a.invalid + c.invalid,
+    }),
+    { new: 0, updated: 0, unchanged: 0, invalid: 0 }
+  );
+
+importsRouter.post('/workbook/preview', uploadFile, async (req, res) => {
+  if (!req.file) throw badRequest('import.noFile');
+  const sections = await diffWorkbook(req.file.buffer);
+  res.json({
+    data: {
+      counts: sumCounts(sections),
+      sections: sections.map(({ type, diff }) => previewOf(type, diff)),
+    },
+  });
+});
+
+importsRouter.post('/workbook/commit', uploadFile, async (req, res) => {
+  if (!req.file) throw badRequest('import.noFile');
+  const user = currentUser(req);
+  const sections = await diffWorkbook(req.file.buffer);
+  const counts = sumCounts(sections);
+
+  if (counts.new + counts.updated > 0) {
+    await withTransaction(async (client) => {
+      for (const { type, diff } of sections) await applyDiff(client, type, diff, user.id);
+    });
+  }
+
+  res.json({
+    data: {
+      applied: counts.new + counts.updated,
+      counts,
+      sections: sections.map(({ type, diff }) => ({
+        type,
+        applied: diff.counts.new + diff.counts.updated,
+        counts: diff.counts,
+      })),
+    },
+  });
+});
+
+/* ------------------------------------------------------- per-type routes */
 
 importsRouter.post('/:type/preview', uploadFile, async (req, res) => {
   const type = parseType(req);
   if (!req.file) throw badRequest('import.noFile');
 
   const diff = await parseAndDiff(type, req.file.buffer);
-  res.json({
-    data: {
-      type,
-      counts: diff.counts,
-      rows: diff.rows.slice(0, PREVIEW_ROWS_CAP),
-      rowsTruncated: Math.max(0, diff.rows.length - PREVIEW_ROWS_CAP),
-      errors: diff.errors.slice(0, ERRORS_CAP),
-      errorsTruncated: Math.max(0, diff.errors.length - ERRORS_CAP),
-    },
-  });
+  res.json({ data: previewOf(type, diff) });
 });
 
 importsRouter.post('/:type/commit', uploadFile, async (req, res) => {
@@ -376,28 +520,7 @@ importsRouter.post('/:type/commit', uploadFile, async (req, res) => {
   const diff = await parseAndDiff(type, req.file.buffer);
 
   if (diff.toApply.length > 0) {
-    await withTransaction(async (client) => {
-      if (type === 'reports') {
-        for (const it of diff.toApply) {
-          await client.query(
-            `INSERT INTO reports (date, emp_num, proj_num, fix, dept, hours, created_by)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-            [it.date, it.emp_num, it.proj_num, it.fix, it.dept, it.hours, user.id]
-          );
-        }
-      } else {
-        const spec = SPECS[type];
-        for (const it of diff.toApply) await spec.apply(client, it, user.id);
-      }
-      // WP §9.2: one activity-log entry per committed import, in the same
-      // transaction as the data it describes.
-      await logWith(client, {
-        userId: user.id,
-        action: ACTION.import,
-        detail: `${type} · +${diff.counts.new} ~${diff.counts.updated} =${diff.counts.unchanged} !${diff.counts.invalid}`,
-        entityKey: type,
-      });
-    });
+    await withTransaction((client) => applyDiff(client, type, diff, user.id));
   }
 
   res.json({
@@ -410,4 +533,3 @@ importsRouter.post('/:type/commit', uploadFile, async (req, res) => {
     },
   });
 });
-

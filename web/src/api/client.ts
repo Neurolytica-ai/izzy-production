@@ -427,6 +427,20 @@ export interface ImportCommitResult {
   errorsTruncated: number;
 }
 
+/** The four master lists read from the office's hours workbook in one upload. */
+export type WorkbookSection = 'departments' | 'employees' | 'projects' | 'repairs';
+
+export interface WorkbookPreview {
+  counts: ImportCounts;
+  sections: (ImportPreview & { type: WorkbookSection })[];
+}
+
+export interface WorkbookCommitResult {
+  applied: number;
+  counts: ImportCounts;
+  sections: { type: WorkbookSection; applied: number; counts: ImportCounts }[];
+}
+
 export type ExportView = 'report' | 'archive' | 'activity';
 
 /** URL for a same-origin .xlsx download; the session cookie rides along. */
@@ -581,6 +595,10 @@ export const api = {
       requestUpload<{ data: ImportPreview }>(`/api/import/${type}/preview`, file).then((r) => r.data),
     commit: (type: ImportType, file: File) =>
       requestUpload<{ data: ImportCommitResult }>(`/api/import/${type}/commit`, file).then((r) => r.data),
+    workbookPreview: (file: File) =>
+      requestUpload<{ data: WorkbookPreview }>('/api/import/workbook/preview', file).then((r) => r.data),
+    workbookCommit: (file: File) =>
+      requestUpload<{ data: WorkbookCommitResult }>('/api/import/workbook/commit', file).then((r) => r.data),
   },
 
   activity: {

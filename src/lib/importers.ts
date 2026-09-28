@@ -1,8 +1,24 @@
 /**
- * The seven import parsers (WP §6.5, §9.1) — ported from the prototype's
- * IMPORTERS table (:842-902), which is the authoritative spec (OPEN-QUESTIONS
- * #5: WP §9.1's column table does not match the files the company actually
- * uses; the prototype's patterns do).
+ * The seven import parsers (WP §6.5, §9.1).
+ *
+ * Two families:
+ *
+ *   - MASTER LISTS (employees, projects, departments, repairs) are read from the
+ *     customer's own hours workbook (דיווח שעות.xlsm) — a fixed sheet and fixed
+ *     column letters per list, as specified by Arad 2026-09-28:
+ *
+ *        Employees    sheet "Employees"   A nick · B number · C name  (+ D status)
+ *        Repairs      sheet "repairs"     A ticket # · B customer
+ *        Departments  sheet "Departments" A name · B number
+ *        Projects     sheet "ProjectNum"  G nick · H name · I parent project #
+ *
+ *     Replaces the prototype's header-guessing parsers for these four, which
+ *     did not match the file the office actually maintains.
+ *
+ *   - SINGLE-SHEET FILES (standard, attendance, reports) keep the prototype's
+ *     parsers (:842-902) — header auto-detected in the first rows of the first
+ *     sheet (OPEN-QUESTIONS #5: WP §9.1's column table is wrong; the prototype's
+ *     patterns are what the real files match).
  *
  * Each parser turns a worksheet grid into normalized rows plus row-level errors
  * (WP §9.2: "Malformed rows are reported with row numbers and skipped without
@@ -16,13 +32,23 @@
  *     to "today", which mis-dates historical rows.
  *   - A row with both a project and a repair is an ERROR (client feedback
  *     2026-08-03 settled OPEN-QUESTIONS #4: exactly one).
- *   - The departments sheet's `code` column is dropped — the schema has no such
- *     column; `bucket` is never touched by import (it is maintenance-screen
+ *   - Department `bucket` is never touched by import (it is maintenance-screen
  *     data, and clobbering it would silently break the dashboard buckets).
  */
 import { query } from './db.ts';
 import { tf } from './messages.ts';
-import { cellDate, clientOf, colMap, contractorOf, findHeader, type Grid } from './xlsx.ts';
+import {
+  cellDate,
+  clientOf,
+  col,
+  colMap,
+  contractorOf,
+  findHeader,
+  firstSheetGrid,
+  namedSheetGrid,
+  type Grid,
+  type Workbook,
+} from './xlsx.ts';
 
 export const IMPORT_TYPES = [
   'employees',
@@ -47,114 +73,175 @@ export interface ParseResult {
   errors: RowError[];
   /** True when the header row could not be located at all. */
   headerMissing?: boolean;
+  /** Set (to the expected sheet name) when a master-list sheet is absent. */
+  sheetMissing?: string;
 }
 
 const asInt = (v: unknown): number | null => {
+  if (v == null || v === '') return null;
   const n = Number(v);
   return Number.isInteger(n) ? n : null;
 };
 
 const text = (v: unknown): string => (v == null ? '' : String(v).trim());
 
-/* ------------------------------------------------------------- employees */
+/* ---------------------------------------------- master lists (hours workbook) */
+
+/** Where each master list lives in the hours workbook. Sheet aliases match case-insensitively. */
+export const WORKBOOK_LAYOUT = {
+  employees: { sheets: ['Employees'], nick: col('A'), num: col('B'), name: col('C'), status: col('D') },
+  repairs: { sheets: ['repairs', 'repaires'], fix: col('A'), client: col('B') },
+  departments: { sheets: ['Departments'], name: col('A'), num: col('B') },
+  projects: { sheets: ['ProjectNum'], nick: col('G'), name: col('H'), num: col('I') },
+} as const;
+
+export type MasterType = keyof typeof WORKBOOK_LAYOUT;
+/** Apply order for the whole-workbook import (no FKs between them; lookups first reads best). */
+export const MASTER_TYPES: MasterType[] = ['departments', 'employees', 'projects', 'repairs'];
+export const isMasterType = (t: string): t is MasterType => t in WORKBOOK_LAYOUT;
+
+/** Every sheet name the master-list import may read — lets the upload skip the rest. */
+export const WORKBOOK_SHEETS = MASTER_TYPES.flatMap((t) => [...WORKBOOK_LAYOUT[t].sheets]);
+
+/**
+ * Index of the first data row: the first row whose key column holds a number.
+ * Everything above it is a title/header block (ProjectNum has a title row over
+ * its header; the others a single header row) and is skipped silently. Below
+ * it, a non-numeric key is a row error. -1 = no data at all.
+ */
+function firstDataRow(grid: Grid, keyCol: number): number {
+  return grid.findIndex((r) => asInt((r ?? [])[keyCol]) != null);
+}
+
+/** Rows from the first data row on, with Excel row numbers; rows blank in `cols` dropped. */
+function* dataRows(grid: Grid, keyCol: number, cols: number[]) {
+  const start = firstDataRow(grid, keyCol);
+  if (start < 0) return;
+  for (let i = start; i < grid.length; i++) {
+    const r = grid[i] ?? [];
+    if (cols.every((c) => text(r[c]) === '')) continue;
+    yield { r, rowNo: i + 1 };
+  }
+}
 
 function parseEmployees(grid: Grid): ParseResult {
-  const h = findHeader(grid, ["מס' עובד", 'מס עובד', 'שם עובד']);
-  if (h.idx < 0) return { items: [], errors: [], headerMissing: true };
-  const cm = colMap(h.row, {
-    num: ["מס' עובד", 'מס עובד', 'מספר עובד'],
-    name: ['שם עובד'],
-    nick: ['מוקלד', 'להקלדה', 'כינוי'],
-    status: ['סטטוס'],
-  });
+  const L = WORKBOOK_LAYOUT.employees;
+  // Arad specified columns A–C. Column D is the office's own עובד / לא עובד
+  // status; it is honored only when its header says so, so that a former
+  // employee is not re-created as active. Without it, `active` is left out of
+  // the row entirely — a new employee gets the DB default (active), an existing
+  // one keeps whatever the Master Data screen set.
+  const start = firstDataRow(grid, L.num);
+  const hasStatus = grid
+    .slice(0, Math.max(start, 0))
+    .some((r) => text((r ?? [])[L.status]).includes('סטטוס'));
 
   const items: Record<string, unknown>[] = [];
   const errors: RowError[] = [];
-  for (let i = h.idx + 1; i < grid.length; i++) {
-    const r = grid[i] ?? [];
-    const rawNum = r[cm.num!];
-    if (rawNum == null || rawNum === 0) continue; // blank / spacer row
-    const name = text(r[cm.name!]);
-    if (!name) continue;
+  for (const { r, rowNo } of dataRows(grid, L.num, [L.nick, L.num, L.name])) {
+    const rawNum = r[L.num];
+    const name = text(r[L.name]);
+    if (text(rawNum) === '' && !name) continue; // stray nickname cell, not an employee row
     const num = asInt(rawNum);
     if (num == null) {
-      errors.push({ row: i + 1, reason: tf('import.badNumber', { v: text(rawNum) }) });
+      errors.push({ row: rowNo, reason: tf('import.badNumber', { v: text(rawNum) || '—' }) });
       continue;
     }
-    const nick = cm.nick != null && r[cm.nick] ? text(r[cm.nick]) : name.split(' ')[0]!;
-    items.push({
+    if (!name) {
+      errors.push({ row: rowNo, reason: tf('import.missingName', {}) });
+      continue;
+    }
+    const item: Record<string, unknown> = {
       num,
       name,
-      nick,
-      active: text(r[cm.status!] ?? 'עובד') !== 'לא עובד',
+      nick: text(r[L.nick]) || name.split(' ')[0]!,
       contractor: contractorOf(name),
-    });
+      __row: rowNo,
+    };
+    const status = text(r[L.status]);
+    if (hasStatus && status) item.active = status !== 'לא עובד';
+    items.push(item);
   }
   return { items, errors };
 }
 
-/* -------------------------------------------------------------- projects */
-
 function parseProjects(grid: Grid): ParseResult {
-  const h = findHeader(grid, ['פרויקט אב', 'פרוייקט אב', 'שם הפרויקט']);
-  if (h.idx < 0) return { items: [], errors: [], headerMissing: true };
-  const cm = colMap(h.row, {
-    num: ['פרויקט אב', 'פרוייקט אב'],
-    name: ['שם הפרויקט', 'שם הפרוייקט'],
-    nick: ['להקלדה', 'כינוי'],
-  });
-
+  const L = WORKBOOK_LAYOUT.projects;
   const items: Record<string, unknown>[] = [];
   const errors: RowError[] = [];
-  for (let i = h.idx + 1; i < grid.length; i++) {
-    const r = grid[i] ?? [];
-    const rawNum = r[cm.num!];
-    if (rawNum == null) continue;
-    const name = text(r[cm.name!]);
-    if (!name) continue;
-    const num = asInt(rawNum);
+  for (const { r, rowNo } of dataRows(grid, L.num, [L.nick, L.name, L.num])) {
+    const num = asInt(r[L.num]);
     if (num == null) {
-      errors.push({ row: i + 1, reason: tf('import.badNumber', { v: text(rawNum) }) });
+      errors.push({ row: rowNo, reason: tf('import.badNumber', { v: text(r[L.num]) || '—' }) });
+      continue;
+    }
+    const name = text(r[L.name]);
+    if (!name) {
+      errors.push({ row: rowNo, reason: tf('import.missingName', {}) });
       continue;
     }
     // Prototype rule (:852): overhead projects are the ones numbered below 1000.
     const overhead = num < 1000;
-    const nick = cm.nick != null && r[cm.nick] ? text(r[cm.nick]) : name;
     items.push({
       num,
       name,
-      nick,
+      // In the office's file column G is `=I<row>` — i.e. the number. It is used
+      // only when the project is NEW; an existing project's typed nickname
+      // (e.g. "נטו") is never overwritten (see the projects spec in routes/imports).
+      nick: text(r[L.nick]) || String(num),
       client: overhead ? 'תקורה' : clientOf(name),
       overhead,
+      __row: rowNo,
     });
   }
   return { items, errors };
 }
 
-/* ----------------------------------------------------------- departments */
-
 function parseDepartments(grid: Grid): ParseResult {
-  const h = findHeader(grid, ["מס' מחלקה", 'מס מחלקה', 'שם מחלקה']);
-  if (h.idx < 0) return { items: [], errors: [], headerMissing: true };
-  const cm = colMap(h.row, {
-    num: ["מס' מחלקה", 'מס מחלקה'],
-    name: ['שם'],
-  });
-
+  const L = WORKBOOK_LAYOUT.departments;
   const items: Record<string, unknown>[] = [];
-  const seen = new Set<string>();
-  for (let i = h.idx + 1; i < grid.length; i++) {
-    const r = grid[i] ?? [];
-    const name = text(r[cm.name!]);
-    if (!name) continue;
-    if (name.startsWith('omer')) continue; // stray test row in the real file (prototype :859)
-    if (seen.has(name)) continue;
-    seen.add(name);
-    const num = r[cm.num!] != null ? asInt(r[cm.num!]) : null;
-    items.push({ name, num });
+  const errors: RowError[] = [];
+  for (const { r, rowNo } of dataRows(grid, L.num, [L.name, L.num])) {
+    const name = text(r[L.name]);
+    if (!name) {
+      errors.push({ row: rowNo, reason: tf('import.missingName', {}) });
+      continue;
+    }
+    if (name.startsWith('omer')) continue; // stray test rows in the real file (prototype :859)
+    const rawNum = r[L.num];
+    const num = asInt(rawNum);
+    if (text(rawNum) !== '' && num == null) {
+      errors.push({ row: rowNo, reason: tf('import.badNumber', { v: text(rawNum) }) });
+      continue;
+    }
+    items.push({ name, num, __row: rowNo });
   }
-  return { items, errors: [] };
+  return { items, errors };
 }
+
+function parseRepairs(grid: Grid): ParseResult {
+  const L = WORKBOOK_LAYOUT.repairs;
+  const items: Record<string, unknown>[] = [];
+  const errors: RowError[] = [];
+  for (const { r, rowNo } of dataRows(grid, L.fix, [L.fix, L.client])) {
+    const fix = asInt(r[L.fix]);
+    if (fix == null) {
+      errors.push({ row: rowNo, reason: tf('import.badNumber', { v: text(r[L.fix]) || '—' }) });
+      continue;
+    }
+    // The workbook carries only number + customer; date and model stay as the
+    // app has them (the repairs spec updates `client` only).
+    items.push({ fix, client: text(r[L.client]), __row: rowNo });
+  }
+  return { items, errors };
+}
+
+const MASTER_PARSERS: Record<MasterType, (g: Grid) => ParseResult> = {
+  employees: parseEmployees,
+  projects: parseProjects,
+  departments: parseDepartments,
+  repairs: parseRepairs,
+};
 
 /* -------------------------------------------------------------- standard */
 
@@ -225,39 +312,6 @@ function parseStandard(grid: Grid): ParseResult {
         ? r[idxTot]
         : BUCKET_KEYS.reduce((s, k) => s + (rec[k] as number), 0);
     items.push(rec);
-  }
-  return { items, errors };
-}
-
-/* --------------------------------------------------------------- repairs */
-
-function parseRepairs(grid: Grid): ParseResult {
-  const h = findHeader(grid, ["מס' תיקון", 'מס תיקון', 'תיקון']);
-  if (h.idx < 0) return { items: [], errors: [], headerMissing: true };
-  const cm = colMap(h.row, {
-    fix: ["מס' תיקון", 'מס תיקון', 'תיקון'],
-    client: ['לקוח'],
-    date: ['תאריך'],
-    model: ['דגם'],
-  });
-
-  const items: Record<string, unknown>[] = [];
-  const errors: RowError[] = [];
-  for (let i = h.idx + 1; i < grid.length; i++) {
-    const r = grid[i] ?? [];
-    const rawFix = r[cm.fix!];
-    if (rawFix == null) continue;
-    const fix = asInt(rawFix);
-    if (fix == null) {
-      errors.push({ row: i + 1, reason: tf('import.badNumber', { v: text(rawFix) }) });
-      continue;
-    }
-    items.push({
-      fix,
-      client: cm.client != null ? text(r[cm.client]) : '',
-      date: cm.date != null ? cellDate(r[cm.date]) : null,
-      model: cm.model != null && r[cm.model] ? text(r[cm.model]) : null,
-    });
   }
   return { items, errors };
 }
@@ -407,18 +461,17 @@ async function parseReports(grid: Grid): Promise<ParseResult> {
 
 /* ------------------------------------------------------------------ entry */
 
-export async function parseImport(type: ImportType, grid: Grid): Promise<ParseResult> {
+export async function parseImport(type: ImportType, wb: Workbook): Promise<ParseResult> {
+  if (isMasterType(type)) {
+    const L = WORKBOOK_LAYOUT[type];
+    const grid = namedSheetGrid(wb, [...L.sheets]);
+    if (!grid) return { items: [], errors: [], sheetMissing: L.sheets[0] };
+    return MASTER_PARSERS[type](grid);
+  }
+  const grid = firstSheetGrid(wb);
   switch (type) {
-    case 'employees':
-      return parseEmployees(grid);
-    case 'projects':
-      return parseProjects(grid);
-    case 'departments':
-      return parseDepartments(grid);
     case 'standard':
       return parseStandard(grid);
-    case 'repairs':
-      return parseRepairs(grid);
     case 'attendance':
       return parseAttendance(grid);
     case 'reports':

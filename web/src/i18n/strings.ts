@@ -301,6 +301,18 @@ export const STRINGS = {
   'import.card.reports': { en: 'Bulk hours reports', he: 'קובץ דיווח שעות (בכמות)' },
   'import.desc.reports': { en: 'Load historical reports in bulk', he: 'טעינת דיווחים היסטוריים בכמות' },
 
+  'import.card.workbook': {
+    en: 'Hours workbook — employees, projects, departments, repairs',
+    he: 'קובץ דיווח שעות — עובדים, פרויקטים, מחלקות, תיקונים',
+  },
+  'import.desc.workbook': {
+    en: 'The office workbook (.xlsm): sheets Employees, ProjectNum, Departments, repairs — all four lists in one load',
+    he: 'קובץ האקסל של המשרד (.xlsm): גיליונות Employees, ProjectNum, Departments, repairs — ארבע הרשימות בטעינה אחת',
+  },
+  'import.readingWorkbook': {
+    en: 'Uploading and reading the workbook… a large file can take up to a minute',
+    he: 'מעלה וקורא את הקובץ… קובץ גדול עשוי לקחת עד דקה',
+  },
   'import.reading': { en: 'Reading file…', he: 'קורא קובץ…' },
   'import.tag.new': { en: '{n} new', he: '{n} חדשים' },
   'import.tag.updated': { en: '{n} updated', he: '{n} עדכון' },

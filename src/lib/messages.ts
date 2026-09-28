@@ -226,6 +226,18 @@ export const MSG = {
     en: 'Employee number {n} does not exist',
     he: 'מספר עובד {n} אינו קיים',
   },
+  'import.sheetMissing': {
+    en: 'The workbook has no sheet named "{sheet}"',
+    he: 'בקובץ אין גיליון בשם "{sheet}"',
+  },
+  'import.missingName': {
+    en: 'Missing name',
+    he: 'שם חסר',
+  },
+  'import.dupInFile': {
+    en: '{key} appears more than once in the file (first on row {first}) — this row was skipped',
+    he: '{key} מופיע יותר מפעם אחת בקובץ (לראשונה בשורה {first}) — השורה דולגה',
+  },
 
   // ---- field validation --------------------------------------------------
   'field.required': {

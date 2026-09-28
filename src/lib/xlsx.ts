@@ -14,13 +14,52 @@ import * as XLSX from 'xlsx';
 /** One worksheet as a row-major grid, nulls preserved — the prototype's sheetGrid(). */
 export type Grid = (string | number | boolean | Date | null)[][];
 
-export function gridFromBuffer(buf: Buffer): Grid {
-  const wb = XLSX.read(buf, { type: 'buffer' });
-  const first = wb.SheetNames[0];
-  if (!first) return [];
-  const ws = wb.Sheets[first]!;
+export type Workbook = XLSX.WorkBook;
+
+/**
+ * Upper bound on rows parsed per sheet when only named sheets are wanted. The
+ * customer's hours workbook (דיווח שעות.xlsm) pads its `repairs` and `ProjectNum`
+ * sheets with ~1M formatted-but-empty rows (~100 MB of XML each); without a cap
+ * a single parse takes ~17 s. The real lists are a few hundred rows.
+ */
+export const NAMED_SHEET_ROW_CAP = 50_000;
+
+/**
+ * Parses an upload. With `sheets`, only those sheets are parsed (and capped at
+ * NAMED_SHEET_ROW_CAP rows) — the hours workbook also carries ~200k rows of
+ * report history that the master-data import must not pay for.
+ */
+export function readWorkbook(buf: Buffer, sheets?: string[]): Workbook {
+  return XLSX.read(buf, {
+    type: 'buffer',
+    dense: true,
+    ...(sheets ? { sheets, sheetRows: NAMED_SHEET_ROW_CAP } : {}),
+  });
+}
+
+function gridOf(ws: XLSX.WorkSheet): Grid {
   return XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null }) as Grid;
 }
+
+/** The first worksheet as a grid — the single-sheet import files (standard, attendance, reports). */
+export function firstSheetGrid(wb: Workbook): Grid {
+  const first = wb.SheetNames[0];
+  return first ? gridOf(wb.Sheets[first]!) : [];
+}
+
+/**
+ * A named worksheet as a grid, matched case- and whitespace-insensitively
+ * against any of `names` (the office has spelled `repairs` as `repaires`).
+ * Returns null when the workbook has no such sheet.
+ */
+export function namedSheetGrid(wb: Workbook, names: string[]): Grid | null {
+  const want = names.map((n) => n.trim().toLowerCase());
+  const hit = wb.SheetNames.find((s) => want.includes(s.trim().toLowerCase()));
+  return hit ? gridOf(wb.Sheets[hit]!) : null;
+}
+
+/** Column letter → 0-based index ('A' → 0, 'G' → 6). */
+export const col = (letter: string): number => XLSX.utils.decode_col(letter);
 
 /**
  * Locates the header row: the first of the top 8 rows containing any of the

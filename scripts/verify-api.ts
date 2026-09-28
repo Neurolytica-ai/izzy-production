@@ -22,6 +22,7 @@ const TEST_PREFIX = '_apitest_';
 const TEST_EMP_BASE = 990_000;
 const TEST_PROJ = 990_001;
 const TEST_DEPT = '_apitest_dept';
+const TEST_DEPT_WB = '_apitest_dept_wb';
 
 let passed = 0;
 let failed = 0;
@@ -158,7 +159,7 @@ async function main() {
     await db.query(`DELETE FROM users WHERE username LIKE $1`, [`${TEST_PREFIX}%`]);
     await db.query(`DELETE FROM employees WHERE num >= $1`, [TEST_EMP_BASE]);
     await db.query(`DELETE FROM projects WHERE num >= $1`, [TEST_EMP_BASE]);
-    await db.query(`DELETE FROM departments WHERE name = $1`, [TEST_DEPT]);
+    await db.query(`DELETE FROM departments WHERE name = ANY($1)`, [[TEST_DEPT, TEST_DEPT_WB]]);
     await db.query(`DELETE FROM standard WHERE box >= $1`, [TEST_EMP_BASE]);
     await db.query(`DELETE FROM repairs WHERE fix >= $1`, [TEST_EMP_BASE]);
   };
@@ -326,7 +327,8 @@ async function main() {
     check('  text direction follows the language', metaConfig.json.data.dir, 'ltr');
     checkTrue(
       '  exposes no secrets',
-      !/secret|password|postgres|supabase/i.test(JSON.stringify(metaConfig.json)),
+      // Values only — the `passwordReset` feature flag's key name is not a secret.
+      !/secret|password|postgres|supabase/i.test(JSON.stringify(Object.values(metaConfig.json.data))),
       JSON.stringify(metaConfig.json)
     );
 
@@ -695,18 +697,31 @@ async function main() {
       XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
       return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
     };
+    /** A multi-sheet workbook, shaped like the office's דיווח שעות.xlsm. */
+    const bookBuf = (sheets: Record<string, unknown[][]>): Buffer => {
+      const wb = XLSX.utils.book_new();
+      for (const [name, aoa] of Object.entries(sheets)) {
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), name);
+      }
+      return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+    };
 
     const IMP_A = TEST_EMP_BASE + 100;
     const IMP_B = TEST_EMP_BASE + 101;
-    // Header row is NOT the first row, and one row has a malformed number —
-    // both are §9 requirements (auto header detection; skip + report bad rows).
-    const empFile = sheetBuf([
-      ['קובץ עובדים לדוגמה'],
-      ["מס' עובד", 'שם עובד', 'מוקלד', 'סטטוס'],
-      [IMP_A, 'בדיקה ראשון - סלים', 'בדיקה1', 'עובד'],
-      ['abc', 'שורה שגויה', '', 'עובד'],
-      [IMP_B, 'בדיקה שני', 'בדיקה2', 'לא עובד'],
-    ]);
+    // Master lists come from the hours workbook: sheet "Employees", A nick ·
+    // B number · C name (· D status). A title row above the header, a malformed
+    // number and a number repeated in the file — each is skipped + reported.
+    const empFile = bookBuf({
+      'דיווחי שעות': [['not read by the master-list import']],
+      Employees: [
+        ['קובץ עובדים לדוגמה'],
+        ['שם עובד מוקלד', "מס' עובד", 'שם עובד', 'סטטוס'],
+        ['בדיקה1', IMP_A, 'בדיקה ראשון - סלים', 'עובד'],
+        ['שגוי', 'abc', 'שורה שגויה', 'עובד'],
+        ['בדיקה2', IMP_B, 'בדיקה שני', 'לא עובד'],
+        ['כפול', IMP_B, 'בדיקה שני כפול', 'עובד'],
+      ],
+    });
 
     check(
       'a reporter cannot import -> 403',
@@ -717,8 +732,8 @@ async function main() {
     const empPrev = await manager.upload('/api/import/employees/preview', empFile);
     check('employees preview -> 200', empPrev.status, 200);
     check('  tags 2 rows as new', empPrev.json.data.counts.new, 2);
-    check('  reports the malformed row as invalid', empPrev.json.data.counts.invalid, 1);
-    check('  with its Excel row number', empPrev.json.data.errors[0].row, 4);
+    check('  reports the malformed + the repeated row as invalid', empPrev.json.data.counts.invalid, 2);
+    check('  with their Excel row numbers', empPrev.json.data.errors.map((e: any) => e.row), [4, 6]);
     const notYet = await db.query('SELECT count(*)::int AS n FROM employees WHERE num = $1', [IMP_A]);
     check('  preview writes nothing', notYet.rows[0].n, 0);
 
@@ -738,7 +753,7 @@ async function main() {
       new: 0,
       updated: 0,
       unchanged: 2,
-      invalid: 1,
+      invalid: 2,
     });
     const empRecommit = await manager.upload('/api/import/employees/commit', empFile);
     check('  re-commit applies nothing', empRecommit.json.data.applied, 0);
@@ -774,6 +789,70 @@ async function main() {
     check('bulk reports commit applied 1', repCommit.json.data.applied, 1);
     const repAgain = await manager.upload('/api/import/reports/commit', repFile);
     check('  the same file again applies 0 (duplicates consumed)', repAgain.json.data.applied, 0);
+
+    // ---- Whole hours workbook: all four master lists in one upload ---------
+    const WB_EMP = TEST_EMP_BASE + 200;
+    const WB_PROJ = TEST_EMP_BASE + 201;
+    const WB_FIX = TEST_EMP_BASE + 202;
+    const hoursBook = (projName: string, client: string) =>
+      bookBuf({
+        Employees: [
+          ['שם עובד מוקלד', "מס' עובד", 'שם עובד'], // no status column (Arad: A–C)
+          ['wbemp', WB_EMP, 'בדיקה חוברת'],
+        ],
+        // ProjectNum: title row, header row, then G nick (=I) · H name · I number.
+        ProjectNum: [
+          [null, null, null, null, null, null, 'פרוייקטים פתוחים מקובץ פרוייקטים'],
+          [null, null, null, null, null, null, 'שם הפרוייקט (נוסחה)', 'שם הפרויקט', 'פרויקט אב'],
+          [null, null, null, null, null, null, WB_PROJ, projName, WB_PROJ],
+        ],
+        Departments: [
+          ['שם מחלקה נוסחה', "מס' מחלקה "],
+          [TEST_DEPT_WB, 9998],
+          ['omer 9', 9], // stray test row in the real file — skipped
+        ],
+        repaires: [
+          ["מס' תיקון", 'לקוח'], // the office's own spelling of the sheet name
+          [WB_FIX, client],
+        ],
+      });
+
+    check(
+      'a master-list file without its sheet -> 400',
+      (await manager.upload('/api/import/employees/preview', sheetBuf([['x']]))).status,
+      400
+    );
+
+    const wbPrev = await manager.upload('/api/import/workbook/preview', hoursBook('פרויקט חוברת', 'לקוח א'), 'hours.xlsm');
+    check('workbook preview -> 200', wbPrev.status, 200);
+    check(
+      '  one section per list, each 1 new',
+      wbPrev.json.data.sections.map((x: any) => [x.type, x.counts.new]),
+      [['departments', 1], ['employees', 1], ['projects', 1], ['repairs', 1]]
+    );
+    check('  summed counts', wbPrev.json.data.counts, { new: 4, updated: 0, unchanged: 0, invalid: 0 });
+    const wbNotYet = await db.query('SELECT count(*)::int AS n FROM projects WHERE num = $1', [WB_PROJ]);
+    check('  preview writes nothing', wbNotYet.rows[0].n, 0);
+    const wbCommit = await manager.upload('/api/import/workbook/commit', hoursBook('פרויקט חוברת', 'לקוח א'), 'hours.xlsm');
+    check('workbook commit applied 4', wbCommit.json.data.applied, 4);
+    const wbProj = await db.query('SELECT nick, name FROM projects WHERE num = $1', [WB_PROJ]);
+    check('  new project: nick from column G', wbProj.rows[0]?.nick, String(WB_PROJ));
+    const wbEmp = await db.query('SELECT active FROM employees WHERE num = $1', [WB_EMP]);
+    check('  new employee without a status column is active', wbEmp.rows[0]?.active, true);
+
+    // Curated data the workbook does not carry must survive a re-import.
+    await db.query("UPDATE projects SET nick = 'wbnick' WHERE num = $1", [WB_PROJ]);
+    await db.query('UPDATE employees SET active = false WHERE num = $1', [WB_EMP]);
+    await db.query("UPDATE repairs SET date = '2026-01-02', model = 'וולבו' WHERE fix = $1", [WB_FIX]);
+    const wbAgain = await manager.upload('/api/import/workbook/preview', hoursBook('פרויקט חוברת', 'לקוח א'), 'hours.xlsm');
+    check('  same workbook again: all unchanged', wbAgain.json.data.counts, { new: 0, updated: 0, unchanged: 4, invalid: 0 });
+    await manager.upload('/api/import/workbook/commit', hoursBook('פרויקט חוברת 2', 'לקוח ב'), 'hours.xlsm');
+    const wbProj2 = await db.query('SELECT nick, name FROM projects WHERE num = $1', [WB_PROJ]);
+    check('  renamed project updates name, keeps the typed nick', [wbProj2.rows[0]?.name, wbProj2.rows[0]?.nick], ['פרויקט חוברת 2', 'wbnick']);
+    const wbEmp2 = await db.query('SELECT active FROM employees WHERE num = $1', [WB_EMP]);
+    check('  an employee set inactive stays inactive', wbEmp2.rows[0]?.active, false);
+    const wbFix2 = await db.query("SELECT client, to_char(date, 'YYYY-MM-DD') AS date, model FROM repairs WHERE fix = $1", [WB_FIX]);
+    check('  repair: client updated, date + model kept', wbFix2.rows[0], { client: 'לקוח ב', date: '2026-01-02', model: 'וולבו' });
 
     check(
       'a text file is rejected as unreadable -> 400',

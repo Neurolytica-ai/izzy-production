@@ -236,6 +236,12 @@ long-running nginx keeps the old one resolved — every API call then returns
 **502 Bad Gateway** until nginx re-resolves the upstream (seen live 2026-08-13).
 
 `nginx/active.conf` is gitignored, so `git pull` never disturbs your HTTPS config.
+The flip side: when a commit changes `nginx/https.conf` (e.g. the 64m upload limit
+for the hours workbook, 2026-09-28), re-copy it or the change never takes effect:
+
+```bash
+cp nginx/https.conf nginx/active.conf && docker compose exec nginx nginx -s reload
+```
 
 ---
 
