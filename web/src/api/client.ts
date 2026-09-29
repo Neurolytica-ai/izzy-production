@@ -148,6 +148,8 @@ export interface Project {
   nick: string;
   client: string;
   overhead: boolean;
+  /** Old project created by the hours-history import; hidden from the grid suggestions. */
+  archived: boolean;
 }
 
 export interface Department {
@@ -427,17 +429,26 @@ export interface ImportCommitResult {
   errorsTruncated: number;
 }
 
-/** The four master lists read from the office's hours workbook in one upload. */
-export type WorkbookSection = 'departments' | 'employees' | 'projects' | 'repairs';
+/** What the office's hours workbook carries: the four master lists + the report history. */
+export type WorkbookSection = 'departments' | 'employees' | 'projects' | 'repairs' | 'reports';
+
+/** Records the report history needs that master data lacks, created by the commit. */
+export interface WorkbookCreates {
+  employees: number;
+  projects: number;
+  repairs: number;
+}
 
 export interface WorkbookPreview {
   counts: ImportCounts;
+  creates: WorkbookCreates;
   sections: (ImportPreview & { type: WorkbookSection })[];
 }
 
 export interface WorkbookCommitResult {
   applied: number;
   counts: ImportCounts;
+  creates: WorkbookCreates;
   sections: { type: WorkbookSection; applied: number; counts: ImportCounts }[];
 }
 

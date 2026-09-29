@@ -26,14 +26,16 @@ export const NAMED_SHEET_ROW_CAP = 50_000;
 
 /**
  * Parses an upload. With `sheets`, only those sheets are parsed (and capped at
- * NAMED_SHEET_ROW_CAP rows) — the hours workbook also carries ~200k rows of
- * report history that the master-data import must not pay for.
+ * `rowCap` rows) — the hours workbook also carries ~200k rows of report history
+ * that the master-data read must not pay for. The history is read separately,
+ * with its own higher cap: one cap for both would either truncate the history
+ * or parse the padded master sheets' million empty rows.
  */
-export function readWorkbook(buf: Buffer, sheets?: string[]): Workbook {
+export function readWorkbook(buf: Buffer, sheets?: string[], rowCap = NAMED_SHEET_ROW_CAP): Workbook {
   return XLSX.read(buf, {
     type: 'buffer',
     dense: true,
-    ...(sheets ? { sheets, sheetRows: NAMED_SHEET_ROW_CAP } : {}),
+    ...(sheets ? { sheets, sheetRows: rowCap } : {}),
   });
 }
 

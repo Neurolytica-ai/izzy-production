@@ -47,7 +47,9 @@ lookupRouter.get('/projects', async (req, res) => {
   const rows = await query(
     `SELECT num, nick, name, client, overhead
        FROM projects
-      WHERE $1 = '' OR nick ILIKE $2 OR name ILIKE $2 OR num::text LIKE $2
+      -- Archived (history-only) projects are not offered for new reports.
+      WHERE NOT archived
+        AND ($1 = '' OR nick ILIKE $2 OR name ILIKE $2 OR num::text LIKE $2)
       ORDER BY (nick = $1) DESC, overhead, num
       LIMIT $3`,
     [q.trim(), likePattern(q), limit]

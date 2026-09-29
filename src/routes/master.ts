@@ -70,6 +70,8 @@ const projectCreate = z.object({
   nick: text(60),
   client: optionalText(150).transform((v) => v ?? '—'),
   overhead: z.coerce.boolean().default(false),
+  // Archived = old project created by the hours-history import (migration 006).
+  archived: z.boolean().default(false),
 });
 
 masterRouter.use(
@@ -78,15 +80,15 @@ masterRouter.use(
     table: 'projects',
     key: 'num',
     keyKind: 'int',
-    select: ['num', 'name', 'nick', 'client', 'overhead'],
-    insertable: ['num', 'name', 'nick', 'client', 'overhead'],
-    updatable: ['name', 'nick', 'client', 'overhead'],
+    select: ['num', 'name', 'nick', 'client', 'overhead', 'archived'],
+    insertable: ['num', 'name', 'nick', 'client', 'overhead', 'archived'],
+    updatable: ['name', 'nick', 'client', 'overhead', 'archived'],
     createSchema: projectCreate,
     updateSchema: projectCreate.partial().omit({ num: true }),
     writeRoles: MASTER_WRITE,
     entity: ENTITY.project,
     label: (r) => `${r.name} (${r.num})`,
-    orderBy: 'overhead, num',
+    orderBy: 'archived, overhead, num',
     listFilter: (q) =>
       q.overhead === 'true'
         ? { sql: 'overhead', values: [] }

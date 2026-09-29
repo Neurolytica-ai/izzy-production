@@ -85,6 +85,16 @@ const asInt = (v: unknown): number | null => {
 
 const text = (v: unknown): string => (v == null ? '' : String(v).trim());
 
+/**
+ * reports.hours is numeric(5,2). Excel floats carry noise (8.78 is stored as
+ * 8.780000000000001), and an unrounded value would never match the stored row
+ * on the next upload — so the duplicate check would re-import it every time.
+ */
+const round2 = (n: number): number => Math.round(n * 100) / 100;
+
+/** Whitespace-insensitive name key — department names carry double spaces (OPEN-QUESTIONS #2). */
+const squash = (s: string) => s.replace(/\s+/g, ' ').trim();
+
 /* ---------------------------------------------- master lists (hours workbook) */
 
 /** Where each master list lives in the hours workbook. Sheet aliases match case-insensitively. */
@@ -191,6 +201,9 @@ function parseProjects(grid: Grid): ParseResult {
       nick: text(r[L.nick]) || String(num),
       client: overhead ? 'תקורה' : clientOf(name),
       overhead,
+      // ProjectNum is the office's list of CURRENT projects: one the history
+      // import archived comes back into the grid's suggestions (migration 006).
+      archived: false,
       __row: rowNo,
     });
   }
@@ -392,7 +405,6 @@ async function parseReports(grid: Grid): Promise<ParseResult> {
   }
   // Whitespace-insensitive department lookup — the master data contains a
   // double-spaced name (OPEN-QUESTIONS #2) and files will have it single-spaced.
-  const squash = (s: string) => s.replace(/\s+/g, ' ');
   const deptBy = new Map<string, string>();
   for (const d of depts) deptBy.set(squash(d.name), d.name);
   const fixSet = new Set(fixes.map((f) => f.fix));
@@ -448,7 +460,7 @@ async function parseReports(grid: Grid): Promise<ParseResult> {
       continue;
     }
 
-    const hours = Number(r[cm.hours!] ?? 0);
+    const hours = round2(Number(r[cm.hours!] ?? 0));
     if (!Number.isFinite(hours) || hours <= 0 || hours > 24) {
       errors.push({ row: rowNo, reason: tf('import.missingHours', {}) });
       continue;
@@ -457,6 +469,201 @@ async function parseReports(grid: Grid): Promise<ParseResult> {
     items.push({ date, emp_num, proj_num, fix, dept, hours });
   }
   return { items, errors };
+}
+
+/* ------------------------------------ report history (hours workbook) */
+
+/**
+ * The hours workbook's report history (Arad 2026-09-29: reports come from
+ * "דיווחי שעות", and the office re-uploads the same file with updates). Fixed
+ * columns, like the master lists — the sheet's header row:
+ *
+ *   A תאריך דיווח · B עובד · C שם הפרויקט + מס' · D דיווח שעות · E מחלקה ·
+ *   F מס' תיקון · G מס פרוייקט · H שם הפרוייקט · I מס עובד · J מס' מחלקה
+ *
+ * Rows resolve by NUMBER (I, G, F), not by typed name: the history spans 2012
+ * onward and names drift. The sheet is not padded like the master sheets, but
+ * it is ~200k rows, hence its own row cap.
+ */
+export const WORKBOOK_HISTORY = {
+  sheets: ['דיווחי שעות'],
+  date: col('A'),
+  emp: col('B'),
+  projText: col('C'),
+  hours: col('D'),
+  dept: col('E'),
+  fix: col('F'),
+  projNum: col('G'),
+  projName: col('H'),
+  empNum: col('I'),
+  deptNum: col('J'),
+} as const;
+
+export const HISTORY_ROW_CAP = 1_000_000;
+
+type Item = Record<string, unknown>;
+
+/** Master data a history row may reference: the database plus this upload's own lists. */
+export interface HistoryLookups {
+  empNums: Set<number>;
+  empByName: Map<string, number>;
+  projNums: Set<number>;
+  fixes: Set<number>;
+  deptByName: Map<string, string>;
+  deptByNum: Map<number, string>;
+}
+
+export async function historyLookups(file: Record<MasterType, Item[]>): Promise<HistoryLookups> {
+  const [emps, projs, depts, fixes] = await Promise.all([
+    query<{ num: number; nick: string; name: string }>('SELECT num, nick, name FROM employees'),
+    query<{ num: number }>('SELECT num FROM projects'),
+    query<{ name: string; num: number | null }>('SELECT name, num FROM departments'),
+    query<{ fix: number }>('SELECT fix FROM repairs'),
+  ]);
+  const L: HistoryLookups = {
+    empNums: new Set(),
+    empByName: new Map(),
+    projNums: new Set(projs.map((p) => p.num)),
+    fixes: new Set(fixes.map((f) => f.fix)),
+    deptByName: new Map(),
+    deptByNum: new Map(),
+  };
+  const addEmp = (num: number, name: string, nick: string) => {
+    L.empNums.add(num);
+    if (nick && !L.empByName.has(nick)) L.empByName.set(nick, num);
+    if (name && !L.empByName.has(name)) L.empByName.set(name, num);
+  };
+  for (const e of emps) addEmp(e.num, e.name, e.nick);
+  for (const e of file.employees) addEmp(e.num as number, e.name as string, e.nick as string);
+  for (const p of file.projects) L.projNums.add(p.num as number);
+  for (const r of file.repairs) L.fixes.add(r.fix as number);
+  // The file's departments are applied first in the same commit, so they count.
+  for (const d of [...depts, ...(file.departments as { name: string; num: number | null }[])]) {
+    L.deptByName.set(squash(d.name), d.name);
+    if (d.num != null && !L.deptByNum.has(d.num)) L.deptByNum.set(d.num, d.name);
+  }
+  return L;
+}
+
+export interface HistoryResult extends ParseResult {
+  /**
+   * Records the history references but master data lacks — created by the
+   * commit so the report rows' FKs hold: former employees (inactive), old
+   * projects (archived), and repair tickets (no customer on the sheet).
+   */
+  creates: { employees: Item[]; projects: Item[]; repairs: Item[] };
+}
+
+export function parseHistory(grid: Grid, known: HistoryLookups): HistoryResult {
+  const L = WORKBOOK_HISTORY;
+  const creates: HistoryResult['creates'] = { employees: [], projects: [], repairs: [] };
+  const h = grid.findIndex((r, i) => i < 8 && text((r ?? [])[L.date]).includes('תאריך'));
+  if (h < 0 || !text((grid[h] ?? [])[L.hours]).includes('שעות')) {
+    return { items: [], errors: [], headerMissing: true, creates };
+  }
+
+  // Keyed so a record is created once however many rows reference it; the
+  // sheet is chronological, so the last row seen carries the latest name.
+  const newEmps = new Map<number, Item>();
+  const newProjs = new Map<number, Item>();
+  const newFixes = new Map<number, Item>();
+  const items: Item[] = [];
+  const errors: RowError[] = [];
+
+  for (let i = h + 1; i < grid.length; i++) {
+    const r = grid[i] ?? [];
+    const empText = text(r[L.emp]);
+    const rawEmpNum = r[L.empNum];
+    if (!empText && text(rawEmpNum) === '') continue; // blank row
+    const rowNo = i + 1;
+
+    const date = cellDate(r[L.date]);
+    if (!date) {
+      errors.push({ row: rowNo, reason: tf('import.missingDate', {}) });
+      continue;
+    }
+    const hours = round2(Number(r[L.hours] ?? 0));
+    if (!Number.isFinite(hours) || hours <= 0 || hours > 24) {
+      errors.push({ row: rowNo, reason: tf('import.missingHours', {}) });
+      continue;
+    }
+
+    // Employee: by number; a row without one falls back to the name.
+    let emp_num = asInt(rawEmpNum);
+    let newEmp: Item | null = null;
+    if (emp_num == null) {
+      emp_num = known.empByName.get(empText) ?? null;
+      if (emp_num == null) {
+        errors.push({ row: rowNo, reason: tf('import.empNotFound', { name: empText || '—' }) });
+        continue;
+      }
+    } else if (!known.empNums.has(emp_num)) {
+      const name = empText || String(emp_num);
+      newEmp = { num: emp_num, name, nick: name.split(' ')[0]!, active: false, contractor: contractorOf(name) };
+    }
+
+    // A repair row: the sheet books it to the "repairs by ticket" project (900)
+    // AND the ticket; the app stores ticket-only rows (exactly one of the two).
+    const rawFix = r[L.fix];
+    let fix: number | null = null;
+    let proj_num: number | null = null;
+    let newProj: Item | null = null;
+    let newFix: Item | null = null;
+    if (text(rawFix) !== '') {
+      fix = asInt(rawFix);
+      if (fix == null) {
+        errors.push({ row: rowNo, reason: tf('import.fixNotFound', { n: text(rawFix) }) });
+        continue;
+      }
+      if (!known.fixes.has(fix)) newFix = { fix, client: '' };
+    } else {
+      proj_num = asInt(r[L.projNum]);
+      if (proj_num == null) {
+        errors.push({ row: rowNo, reason: tf('import.projNotFound', { name: text(r[L.projText]) || '—' }) });
+        continue;
+      }
+      if (!known.projNums.has(proj_num)) {
+        const name = text(r[L.projName]) || text(r[L.projText]) || String(proj_num);
+        const overhead = proj_num < 1000;
+        newProj = {
+          num: proj_num,
+          name,
+          nick: String(proj_num),
+          client: overhead ? 'תקורה' : clientOf(name) || '—',
+          overhead,
+          archived: true,
+        };
+      }
+    }
+
+    // Department: the name (E); old rows leave it blank and carry only the number (J).
+    const deptText = text(r[L.dept]);
+    let dept: string | null = null;
+    if (deptText) {
+      dept = known.deptByName.get(squash(deptText)) ?? null;
+      if (!dept) {
+        errors.push({ row: rowNo, reason: tf('import.deptNotFound', { name: deptText }) });
+        continue;
+      }
+    } else {
+      const dn = asInt(r[L.deptNum]);
+      dept = dn != null ? known.deptByNum.get(dn) ?? null : null;
+    }
+
+    if (newEmp) {
+      newEmps.set(emp_num, newEmp);
+      // A later row of the same person may lack the number (column I blank).
+      if (!known.empByName.has(newEmp.name as string)) known.empByName.set(newEmp.name as string, emp_num);
+    }
+    if (newProj) newProjs.set(proj_num!, newProj);
+    if (newFix) newFixes.set(fix!, newFix);
+    items.push({ date, emp_num, proj_num, fix, dept, hours, __row: rowNo });
+  }
+
+  creates.employees = [...newEmps.values()];
+  creates.projects = [...newProjs.values()];
+  creates.repairs = [...newFixes.values()];
+  return { items, errors, creates };
 }
 
 /* ------------------------------------------------------------------ entry */

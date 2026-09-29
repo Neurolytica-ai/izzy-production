@@ -237,11 +237,19 @@ long-running nginx keeps the old one resolved — every API call then returns
 
 `nginx/active.conf` is gitignored, so `git pull` never disturbs your HTTPS config.
 The flip side: when a commit changes `nginx/https.conf` (e.g. the 64m upload limit
-for the hours workbook, 2026-09-28), re-copy it or the change never takes effect:
+for the hours workbook, 2026-09-28; the 600s `/api/import/` timeout for the report
+history, 2026-09-29), re-copy it or the change never takes effect:
 
 ```bash
 cp nginx/https.conf nginx/active.conf && docker compose exec nginx nginx -s reload
 ```
+
+**Version badge.** The header shows `v<version> · <commit> · <build time, Israel>`
+(e.g. `v0.2.0 · e62d288 · 29/09 17:40`) so the client can see a deploy reached
+them. The commit and time update on every build by themselves; bump `version`
+before each client-facing release (`npm version <x.y.z> --no-git-tag-version`,
+commit both package files). After deploying, a hard refresh (Ctrl+F5) should show
+the new badge — if it shows the old commit, the deploy didn't take.
 
 ---
 

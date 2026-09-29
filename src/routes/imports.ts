@@ -22,11 +22,16 @@ import { query, withTransaction } from '../lib/db.ts';
 import { ACTION, logWith } from '../lib/activity.ts';
 import { badRequest, badRequestText } from '../lib/errors.ts';
 import {
+  HISTORY_ROW_CAP,
   IMPORT_TYPES,
   MASTER_TYPES,
+  WORKBOOK_HISTORY,
   WORKBOOK_SHEETS,
+  historyLookups,
   isMasterType,
+  parseHistory,
   parseImport,
+  type HistoryResult,
   type ImportType,
   type MasterType,
   type ParseResult,
@@ -34,7 +39,7 @@ import {
 } from '../lib/importers.ts';
 import { tf } from '../lib/messages.ts';
 import { MASTER_WRITE, currentUser, requireRole } from '../middleware/auth.ts';
-import { readWorkbook, type Workbook } from '../lib/xlsx.ts';
+import { namedSheetGrid, readWorkbook, type Workbook } from '../lib/xlsx.ts';
 
 export const importsRouter = Router();
 
@@ -120,20 +125,23 @@ const SPECS: Record<Exclude<ImportType, 'reports'>, TypeSpec> = {
     // `nick` is written on INSERT only: the workbook's nick column (G) is just
     // the project number, and must not overwrite the short nicknames the office
     // types in the hours grid ("נטו", "דבאח"). Edit those in Master Data.
-    fields: ['name', 'client', 'overhead'],
+    fields: ['name', 'client', 'overhead', 'archived'],
     label: (it) => `${it.name} (${it.num})`,
     load: async () =>
-      toMap(await query('SELECT num, name, nick, client, overhead FROM projects'), (r) =>
+      toMap(await query('SELECT num, name, nick, client, overhead, archived FROM projects'), (r) =>
         String(r.num)
       ),
+    // `archived` is only ever false from ProjectNum (a listed project is live);
+    // COALESCE keeps it as-is for any caller whose rows do not carry it.
     apply: async (client, it) => {
       await client.query(
-        `INSERT INTO projects (num, name, nick, client, overhead)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO projects (num, name, nick, client, overhead, archived)
+         VALUES ($1, $2, $3, $4, $5, COALESCE($6::boolean, false))
          ON CONFLICT (num) DO UPDATE
            SET name = EXCLUDED.name,
-               client = EXCLUDED.client, overhead = EXCLUDED.overhead`,
-        [it.num, it.name, it.nick, it.client, it.overhead]
+               client = EXCLUDED.client, overhead = EXCLUDED.overhead,
+               archived = COALESCE($6::boolean, projects.archived)`,
+        [it.num, it.name, it.nick, it.client, it.overhead, it.archived ?? null]
       );
     },
   },
@@ -241,9 +249,9 @@ function parseType(req: { params: { type?: string } }): ImportType {
 }
 
 /** Master lists read only their named sheets out of the (large) hours workbook. */
-function read(buf: Buffer, sheets?: string[]): Workbook {
+function read(buf: Buffer, sheets?: string[], rowCap?: number): Workbook {
   try {
-    return readWorkbook(buf, sheets);
+    return readWorkbook(buf, sheets, rowCap);
   } catch {
     throw badRequest('import.badFile');
   }
@@ -396,17 +404,68 @@ async function parseAndDiff(type: ImportType, buf: Buffer): Promise<Diff> {
   return diffParsed(type, parsed);
 }
 
+/**
+ * Rows per multi-row INSERT. The workbook history is ~200k report rows: one
+ * round trip each to the Supabase pooler would take many minutes, so rows go
+ * in as arrays through unnest().
+ */
+const BATCH = 5000;
+
+async function inBatches(rows: Item[], run: (batch: Item[]) => Promise<unknown>) {
+  for (let i = 0; i < rows.length; i += BATCH) await run(rows.slice(i, i + BATCH));
+}
+
+const colOf = (rows: Item[], key: string) => rows.map((r) => r[key] ?? null);
+
+async function insertReports(client: PoolClient, rows: Item[], userId: number) {
+  await inBatches(rows, (b) =>
+    client.query(
+      `INSERT INTO reports (date, emp_num, proj_num, fix, dept, hours, created_by)
+       SELECT d, e, p, f, dp, h, $7
+         FROM unnest($1::date[], $2::int[], $3::int[], $4::int[], $5::text[], $6::numeric[])
+              AS t(d, e, p, f, dp, h)`,
+      [colOf(b, 'date'), colOf(b, 'emp_num'), colOf(b, 'proj_num'), colOf(b, 'fix'), colOf(b, 'dept'), colOf(b, 'hours'), userId]
+    )
+  );
+}
+
+/**
+ * The records the report history needs but master data lacks (see
+ * parseHistory). DO NOTHING on conflict: these are placeholders for FKs and
+ * must never overwrite a record that exists by commit time.
+ */
+async function applyHistoryCreates(client: PoolClient, creates: HistoryResult['creates']) {
+  await inBatches(creates.employees, (b) =>
+    client.query(
+      `INSERT INTO employees (num, name, nick, active, contractor)
+       SELECT * FROM unnest($1::int[], $2::text[], $3::text[], $4::boolean[], $5::text[])
+       ON CONFLICT (num) DO NOTHING`,
+      [colOf(b, 'num'), colOf(b, 'name'), colOf(b, 'nick'), colOf(b, 'active'), colOf(b, 'contractor')]
+    )
+  );
+  await inBatches(creates.projects, (b) =>
+    client.query(
+      `INSERT INTO projects (num, name, nick, client, overhead, archived)
+       SELECT * FROM unnest($1::int[], $2::text[], $3::text[], $4::text[], $5::boolean[], $6::boolean[])
+       ON CONFLICT (num) DO NOTHING`,
+      [colOf(b, 'num'), colOf(b, 'name'), colOf(b, 'nick'), colOf(b, 'client'), colOf(b, 'overhead'), colOf(b, 'archived')]
+    )
+  );
+  await inBatches(creates.repairs, (b) =>
+    client.query(
+      `INSERT INTO repairs (fix, client)
+       SELECT * FROM unnest($1::int[], $2::text[])
+       ON CONFLICT (fix) DO NOTHING`,
+      [colOf(b, 'fix'), colOf(b, 'client')]
+    )
+  );
+}
+
 /** Writes a diff's rows + its activity-log entry, inside the caller's transaction. */
-async function applyDiff(client: PoolClient, type: ImportType, diff: Diff, userId: number) {
+async function applyDiff(client: PoolClient, type: ImportType, diff: Diff, userId: number, detailExtra = '') {
   if (diff.toApply.length === 0) return;
   if (type === 'reports') {
-    for (const it of diff.toApply) {
-      await client.query(
-        `INSERT INTO reports (date, emp_num, proj_num, fix, dept, hours, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [it.date, it.emp_num, it.proj_num, it.fix, it.dept, it.hours, userId]
-      );
-    }
+    await insertReports(client, diff.toApply, userId);
   } else {
     const spec = SPECS[type];
     for (const it of diff.toApply) await spec.apply(client, it, userId);
@@ -416,7 +475,7 @@ async function applyDiff(client: PoolClient, type: ImportType, diff: Diff, userI
   await logWith(client, {
     userId,
     action: ACTION.import,
-    detail: `${type} · +${diff.counts.new} ~${diff.counts.updated} =${diff.counts.unchanged} !${diff.counts.invalid}`,
+    detail: `${type} · +${diff.counts.new} ~${diff.counts.updated} =${diff.counts.unchanged} !${diff.counts.invalid}${detailExtra}`,
     entityKey: type,
   });
 }
@@ -436,23 +495,47 @@ const previewOf = (type: ImportType, diff: Diff) => ({
 /* ------------------------------------------------- whole-workbook import */
 
 /**
- * The office's hours workbook (דיווח שעות.xlsm) holds all four master lists —
- * employees, departments, projects, repairs — at fixed sheets/columns
- * (lib/importers WORKBOOK_LAYOUT). Uploading a ~34 MB file four times, twice
- * each, is not a workflow, so this pair of routes previews and commits all
- * four from one upload. Commit is one transaction: all four lists or none.
+ * The office's hours workbook (דיווח שעות.xlsm) is the ONE upload (Arad,
+ * 2026-09-29): the four master lists at fixed sheets/columns (lib/importers
+ * WORKBOOK_LAYOUT) plus the report history in "דיווחי שעות" (WORKBOOK_HISTORY).
+ * The office re-uploads the same file as it grows, so everything here is
+ * idempotent — lists diff by key, history rows by consumed duplicates.
+ *
+ * Commit is one transaction, in FK order: master lists, then the records the
+ * history needs but the lists lack (former employees, old projects, tickets),
+ * then the report rows.
  *
  * Registered before `/:type/...` so `workbook` is not taken for a type name.
  */
-async function diffWorkbook(buf: Buffer): Promise<{ type: MasterType; diff: Diff }[]> {
+type WorkbookSection = MasterType | 'reports';
+
+interface WorkbookDiff {
+  sections: { type: WorkbookSection; diff: Diff }[];
+  creates: HistoryResult['creates'];
+}
+
+async function diffWorkbook(buf: Buffer): Promise<WorkbookDiff> {
   const wb = read(buf, WORKBOOK_SHEETS);
   const parsed = await Promise.all(MASTER_TYPES.map((type) => parseChecked(type, wb)));
-  if (parsed.every(isEmpty)) throw badRequest('import.noRows');
-  const out: { type: MasterType; diff: Diff }[] = [];
+
+  // The history sheet is read on its own (see readWorkbook) — ~200k rows.
+  const histGrid = namedSheetGrid(read(buf, [...WORKBOOK_HISTORY.sheets], HISTORY_ROW_CAP), [
+    ...WORKBOOK_HISTORY.sheets,
+  ]);
+  if (!histGrid) throw badRequestText(tf('import.sheetMissing', { sheet: WORKBOOK_HISTORY.sheets[0] }));
+  const fileMasters = Object.fromEntries(
+    MASTER_TYPES.map((type, i) => [type, parsed[i]!.items])
+  ) as Record<MasterType, Item[]>;
+  const history = parseHistory(histGrid, await historyLookups(fileMasters));
+  if (history.headerMissing) throw badRequest('import.headerNotFound');
+
+  if (parsed.every(isEmpty) && isEmpty(history)) throw badRequest('import.noRows');
+  const sections: WorkbookDiff['sections'] = [];
   for (let i = 0; i < MASTER_TYPES.length; i++) {
-    out.push({ type: MASTER_TYPES[i]!, diff: await diffParsed(MASTER_TYPES[i]!, parsed[i]!) });
+    sections.push({ type: MASTER_TYPES[i]!, diff: await diffParsed(MASTER_TYPES[i]!, parsed[i]!) });
   }
-  return out;
+  sections.push({ type: 'reports', diff: await diffParsed('reports', history) });
+  return { sections, creates: history.creates };
 }
 
 const sumCounts = (sections: { diff: Diff }[]): Diff['counts'] =>
@@ -466,12 +549,19 @@ const sumCounts = (sections: { diff: Diff }[]): Diff['counts'] =>
     { new: 0, updated: 0, unchanged: 0, invalid: 0 }
   );
 
+const createCounts = (c: HistoryResult['creates']) => ({
+  employees: c.employees.length,
+  projects: c.projects.length,
+  repairs: c.repairs.length,
+});
+
 importsRouter.post('/workbook/preview', uploadFile, async (req, res) => {
   if (!req.file) throw badRequest('import.noFile');
-  const sections = await diffWorkbook(req.file.buffer);
+  const { sections, creates } = await diffWorkbook(req.file.buffer);
   res.json({
     data: {
       counts: sumCounts(sections),
+      creates: createCounts(creates),
       sections: sections.map(({ type, diff }) => previewOf(type, diff)),
     },
   });
@@ -480,12 +570,20 @@ importsRouter.post('/workbook/preview', uploadFile, async (req, res) => {
 importsRouter.post('/workbook/commit', uploadFile, async (req, res) => {
   if (!req.file) throw badRequest('import.noFile');
   const user = currentUser(req);
-  const sections = await diffWorkbook(req.file.buffer);
+  const { sections, creates } = await diffWorkbook(req.file.buffer);
   const counts = sumCounts(sections);
+  const made = createCounts(creates);
 
   if (counts.new + counts.updated > 0) {
     await withTransaction(async (client) => {
-      for (const { type, diff } of sections) await applyDiff(client, type, diff, user.id);
+      for (const { type, diff } of sections) {
+        if (type === 'reports') {
+          await applyHistoryCreates(client, creates);
+          await applyDiff(client, type, diff, user.id, ` · created emp ${made.employees} proj ${made.projects} fix ${made.repairs}`);
+        } else {
+          await applyDiff(client, type, diff, user.id);
+        }
+      }
     });
   }
 
@@ -493,6 +591,7 @@ importsRouter.post('/workbook/commit', uploadFile, async (req, res) => {
     data: {
       applied: counts.new + counts.updated,
       counts,
+      creates: made,
       sections: sections.map(({ type, diff }) => ({
         type,
         applied: diff.counts.new + diff.counts.updated,

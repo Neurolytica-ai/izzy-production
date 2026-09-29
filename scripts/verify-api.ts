@@ -794,8 +794,21 @@ async function main() {
     const WB_EMP = TEST_EMP_BASE + 200;
     const WB_PROJ = TEST_EMP_BASE + 201;
     const WB_FIX = TEST_EMP_BASE + 202;
-    const hoursBook = (projName: string, client: string) =>
+    const WB_OLD_EMP = TEST_EMP_BASE + 203; // in the history only — a former employee
+    const WB_OLD_PROJ = TEST_EMP_BASE + 204; // in the history only — an old project
+    const WB_OLD_FIX = TEST_EMP_BASE + 205; // in the history only — a repair ticket
+    const hSerial = Math.round((Date.UTC(2026, 6, 25) - Date.UTC(1899, 11, 30)) / 86_400_000);
+    const hoursBook = (projName: string, client: string, oldProjListed = false) =>
       bookBuf({
+        // Report history, fixed columns A–J (lib/importers WORKBOOK_HISTORY).
+        'דיווחי שעות': [
+          ['תאריך דיווח', 'עובד', "שם הפרויקט + מס'", 'דיווח שעות', 'מחלקה', "מס' תיקון", 'מס פרוייקט', 'שם הפרוייקט', 'מס עובד', "מס' מחלקה"],
+          [hSerial, 'בדיקה חוברת', projName, 8.780000000000001, TEST_DEPT_WB, null, WB_PROJ, projName, WB_EMP, 9998],
+          [hSerial, 'עובד לשעבר', 'פרויקט ישן', 3, TEST_DEPT_WB, null, WB_OLD_PROJ, 'פרויקט ישן - בדיקה', WB_OLD_EMP, 9998],
+          [hSerial, 'בדיקה חוברת', 'תיקון', 1.5, TEST_DEPT_WB, WB_OLD_FIX, 900, 'תיקונים - לפי כרטיס תיקון', WB_EMP, 9998],
+          [hSerial, 'בדיקה חוברת', projName, 2, null, null, WB_PROJ, projName, WB_EMP, 9998], // no dept name: by number
+          [hSerial, 'אין כזה עובד', projName, 1, TEST_DEPT_WB, null, WB_PROJ, projName, null, 9998], // no number, unknown name
+        ],
         Employees: [
           ['שם עובד מוקלד', "מס' עובד", 'שם עובד'], // no status column (Arad: A–C)
           ['wbemp', WB_EMP, 'בדיקה חוברת'],
@@ -805,6 +818,7 @@ async function main() {
           [null, null, null, null, null, null, 'פרוייקטים פתוחים מקובץ פרוייקטים'],
           [null, null, null, null, null, null, 'שם הפרוייקט (נוסחה)', 'שם הפרויקט', 'פרויקט אב'],
           [null, null, null, null, null, null, WB_PROJ, projName, WB_PROJ],
+          ...(oldProjListed ? [[null, null, null, null, null, null, WB_OLD_PROJ, 'פרויקט ישן - חזר', WB_OLD_PROJ]] : []),
         ],
         Departments: [
           ['שם מחלקה נוסחה', "מס' מחלקה "],
@@ -826,15 +840,31 @@ async function main() {
     const wbPrev = await manager.upload('/api/import/workbook/preview', hoursBook('פרויקט חוברת', 'לקוח א'), 'hours.xlsm');
     check('workbook preview -> 200', wbPrev.status, 200);
     check(
-      '  one section per list, each 1 new',
+      '  one section per list + the history',
       wbPrev.json.data.sections.map((x: any) => [x.type, x.counts.new]),
-      [['departments', 1], ['employees', 1], ['projects', 1], ['repairs', 1]]
+      [['departments', 1], ['employees', 1], ['projects', 1], ['repairs', 1], ['reports', 4]]
     );
-    check('  summed counts', wbPrev.json.data.counts, { new: 4, updated: 0, unchanged: 0, invalid: 0 });
+    check('  summed counts', wbPrev.json.data.counts, { new: 8, updated: 0, unchanged: 0, invalid: 1 });
+    check('  history: records to create', wbPrev.json.data.creates, { employees: 1, projects: 1, repairs: 1 });
     const wbNotYet = await db.query('SELECT count(*)::int AS n FROM projects WHERE num = $1', [WB_PROJ]);
     check('  preview writes nothing', wbNotYet.rows[0].n, 0);
     const wbCommit = await manager.upload('/api/import/workbook/commit', hoursBook('פרויקט חוברת', 'לקוח א'), 'hours.xlsm');
-    check('workbook commit applied 4', wbCommit.json.data.applied, 4);
+    check('workbook commit applied 8', wbCommit.json.data.applied, 8);
+    const hRows = await db.query(
+      `SELECT emp_num, proj_num, fix, dept, hours::float AS hours FROM reports
+        WHERE date = '2026-07-25' AND emp_num = ANY($1) ORDER BY hours`,
+      [[WB_EMP, WB_OLD_EMP]]
+    );
+    check('  history rows stored', hRows.rows.length, 4);
+    check('  hours rounded to 2 decimals', hRows.rows.map((r: any) => r.hours), [1.5, 2, 3, 8.78]);
+    check('  repair row stored ticket-only (placeholder project 900 dropped)', [hRows.rows[0].proj_num, hRows.rows[0].fix], [null, WB_OLD_FIX]);
+    check('  blank department resolved by its number', hRows.rows[1].dept, TEST_DEPT_WB);
+    const oldEmp = await db.query('SELECT name, active FROM employees WHERE num = $1', [WB_OLD_EMP]);
+    check('  former employee created inactive', oldEmp.rows[0], { name: 'עובד לשעבר', active: false });
+    const oldProj = await db.query('SELECT name, archived FROM projects WHERE num = $1', [WB_OLD_PROJ]);
+    check('  old project created archived', oldProj.rows[0], { name: 'פרויקט ישן - בדיקה', archived: true });
+    const oldLookup = await manager.get(`/api/lookup/projects?q=${WB_OLD_PROJ}`);
+    check('  an archived project is not suggested in the grid', oldLookup.json.data.length, 0);
     const wbProj = await db.query('SELECT nick, name FROM projects WHERE num = $1', [WB_PROJ]);
     check('  new project: nick from column G', wbProj.rows[0]?.nick, String(WB_PROJ));
     const wbEmp = await db.query('SELECT active FROM employees WHERE num = $1', [WB_EMP]);
@@ -845,8 +875,12 @@ async function main() {
     await db.query('UPDATE employees SET active = false WHERE num = $1', [WB_EMP]);
     await db.query("UPDATE repairs SET date = '2026-01-02', model = 'וולבו' WHERE fix = $1", [WB_FIX]);
     const wbAgain = await manager.upload('/api/import/workbook/preview', hoursBook('פרויקט חוברת', 'לקוח א'), 'hours.xlsm');
-    check('  same workbook again: all unchanged', wbAgain.json.data.counts, { new: 0, updated: 0, unchanged: 4, invalid: 0 });
-    await manager.upload('/api/import/workbook/commit', hoursBook('פרויקט חוברת 2', 'לקוח ב'), 'hours.xlsm');
+    check('  same workbook again: all unchanged', wbAgain.json.data.counts, { new: 0, updated: 0, unchanged: 8, invalid: 1 });
+    check('  and nothing more to create', wbAgain.json.data.creates, { employees: 0, projects: 0, repairs: 0 });
+    const wbThird = await manager.upload('/api/import/workbook/commit', hoursBook('פרויקט חוברת 2', 'לקוח ב', true), 'hours.xlsm');
+    check('  the updated file adds no duplicate history rows', wbThird.json.data.sections.find((x: any) => x.type === 'reports').applied, 0);
+    const back = await db.query('SELECT name, archived FROM projects WHERE num = $1', [WB_OLD_PROJ]);
+    check('  an archived project listed in ProjectNum again is un-archived', back.rows[0], { name: 'פרויקט ישן - חזר', archived: false });
     const wbProj2 = await db.query('SELECT nick, name FROM projects WHERE num = $1', [WB_PROJ]);
     check('  renamed project updates name, keeps the typed nick', [wbProj2.rows[0]?.name, wbProj2.rows[0]?.nick], ['פרויקט חוברת 2', 'wbnick']);
     const wbEmp2 = await db.query('SELECT active FROM employees WHERE num = $1', [WB_EMP]);

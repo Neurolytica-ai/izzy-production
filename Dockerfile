@@ -11,6 +11,9 @@ COPY tsconfig.json vite.config.ts ./
 COPY src ./src
 COPY scripts ./scripts
 COPY web ./web
+# Only so vite.config.ts can read the commit hash for the header version badge;
+# this stage is discarded, so .git never reaches the runtime image.
+COPY .git ./.git
 RUN npm run build && npm run web:build
 
 # ---- runtime --------------------------------------------------------------

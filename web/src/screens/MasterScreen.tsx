@@ -74,6 +74,9 @@ export function MasterScreen({ role }: { role: Role }) {
 
   const [editing, setEditing] = useState<Editing | null>(null);
   const [deleting, setDeleting] = useState<Deleting | null>(null);
+  // ~2,450 old projects come in with the report history (archived); listing
+  // them all by default would bury the live ones.
+  const [showArchived, setShowArchived] = useState(false);
 
   const creators = {
     employees: useCreateEmployee(),
@@ -122,6 +125,7 @@ export function MasterScreen({ role }: { role: Role }) {
       { key: 'nick', label: t('field.proj.nick'), required: true },
       { key: 'client', label: t('field.proj.client') },
       { key: 'overhead', label: t('field.proj.overhead'), type: 'bool' },
+      { key: 'archived', label: t('field.proj.archived'), type: 'bool' },
     ],
     departments: [
       { key: 'name', label: t('field.dept.name'), required: true },
@@ -213,7 +217,9 @@ export function MasterScreen({ role }: { role: Role }) {
     ) : null;
 
   const activeEmployees = (employees.data ?? []).filter((e) => e.active);
-  const productive = (projects.data ?? []).filter((p) => !p.overhead);
+  const productive = (projects.data ?? []).filter((p) => !p.overhead && !p.archived);
+  const archivedCount = (projects.data ?? []).filter((p) => p.archived).length;
+  const shownProjects = (projects.data ?? []).filter((p) => showArchived || !p.archived);
   const clients = new Set(productive.map((p) => p.client));
 
   return (
@@ -273,10 +279,18 @@ export function MasterScreen({ role }: { role: Role }) {
 
       <Section
         title={t('master.section.projects')}
-        count={projects.data?.length}
+        count={projects.data ? shownProjects.length : undefined}
         query={projects}
         onAdd={canWrite ? () => setEditing({ entity: 'projects', record: null }) : undefined}
         addLabel={t('master.add.project')}
+        note={
+          archivedCount > 0 && (
+            <label className="mini" style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+              <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+              {t('master.showArchived', { n: archivedCount })}
+            </label>
+          )
+        }
       >
         <table className="xl" style={{ fontSize: 12.5, minWidth: 680 }}>
           <thead>
@@ -290,7 +304,7 @@ export function MasterScreen({ role }: { role: Role }) {
             </tr>
           </thead>
           <tbody>
-            {(projects.data ?? []).map((p) => (
+            {shownProjects.map((p) => (
               <tr key={p.num}>
                 <td className="derived">{p.num}</td>
                 <td className="derived" style={{ textAlign: 'start' }} title={p.name}>
@@ -302,6 +316,7 @@ export function MasterScreen({ role }: { role: Role }) {
                   <span className={`pill ${p.overhead ? 'y' : 'g'}`}>
                     {p.overhead ? t('master.overhead') : t('master.productive')}
                   </span>
+                  {p.archived && <span className="mini"> {t('master.archived')}</span>}
                 </td>
                 <td className="actcell">{actions('projects', p.num, `${p.name} (${p.num})`, p)}</td>
               </tr>

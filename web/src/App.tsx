@@ -50,6 +50,23 @@ const RESET_TOKEN = window.location.hash.startsWith('#reset=')
   ? window.location.hash.slice('#reset='.length)
   : null;
 
+/**
+ * Version badge for the header, so the client can see a deploy has reached them
+ * (Arad, 2026-09-29): "v0.2.0 · e62d288 · 29/09 17:40". Build time is Israel time.
+ */
+const APP_BUILT_AT = new Date(__APP_BUILT__).toLocaleString('en-GB', {
+  timeZone: 'Asia/Jerusalem',
+  day: '2-digit',
+  month: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+}).replace(',', '');
+const APP_VERSION_LABEL = [`v${__APP_VERSION__}`, __APP_COMMIT__, APP_BUILT_AT]
+  .filter(Boolean)
+  .join(' · ');
+const APP_BUILD_TITLE = `v${__APP_VERSION__}${__APP_COMMIT__ ? ` (${__APP_COMMIT__})` : ''} — ${__APP_BUILT__}`;
+
 export function App() {
   const t = useT();
   const me = useMe();
@@ -106,6 +123,9 @@ export function App() {
           <div className="sub">{t('app.subtitle')}</div>
         </div>
         <div style={{ marginInlineStart: 'auto', display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span className="ver" title={APP_BUILD_TITLE}>
+            {APP_VERSION_LABEL}
+          </span>
           <LangToggle />
           <div style={{ fontSize: 12, color: '#fff' }}>
             👤 {user.display_name} <span style={{ opacity: 0.75 }}>({user.role})</span>

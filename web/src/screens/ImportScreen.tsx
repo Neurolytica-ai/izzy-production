@@ -4,7 +4,6 @@ import {
   api,
   type ImportCounts,
   type ImportPreview,
-  type ImportType,
   type Role,
   type WorkbookPreview,
   type WorkbookSection,
@@ -20,22 +19,18 @@ import type { StringKey } from '../i18n/strings.ts';
  * was previewed even if someone else changed data in between (anything now
  * unchanged is simply skipped).
  *
- * The four master lists (employees, projects, departments, repairs) come from
- * ONE file — the office's hours workbook, דיווח שעות.xlsm (Arad, 2026-09-28) —
- * so they share one card. The remaining cards take their own single-sheet files.
+ * ONE upload (Arad, 2026-09-29): the office's hours workbook, דיווח שעות.xlsm,
+ * carries the four master lists and the report history ("דיווחי שעות"), and the
+ * office re-uploads it as it grows. The standard-hours and attendance cards were
+ * removed at the same time; their endpoints remain on the server, unused.
  */
-
-const SINGLE_CARDS: { type: ImportType; icon: string; titleKey: StringKey; descKey: StringKey }[] = [
-  { type: 'standard', icon: '📐', titleKey: 'import.card.standard', descKey: 'import.desc.standard' },
-  { type: 'attendance', icon: '⏱️', titleKey: 'import.card.attendance', descKey: 'import.desc.attendance' },
-  { type: 'reports', icon: '📋', titleKey: 'import.card.reports', descKey: 'import.desc.reports' },
-];
 
 const SECTION_TITLE: Record<WorkbookSection, StringKey> = {
   departments: 'import.card.departments',
   employees: 'import.card.employees',
   projects: 'import.card.projects',
   repairs: 'import.card.repairs',
+  reports: 'import.card.history',
 };
 
 const ACCEPT = '.xlsx,.xlsm,.xls';
@@ -69,24 +64,19 @@ export function ImportScreen({ role }: { role: Role }) {
                 {t(SECTION_TITLE[s.type])}
               </div>
               <PreviewBody preview={s} />
+              {s.type === 'reports' && p.creates.employees + p.creates.projects + p.creates.repairs > 0 && (
+                <div className="mini" style={{ margin: '4px 0' }}>
+                  {t('import.history.creates', {
+                    emp: p.creates.employees,
+                    proj: p.creates.projects,
+                    fix: p.creates.repairs,
+                  })}
+                </div>
+              )}
             </div>
           ))
         }
       />
-      {SINGLE_CARDS.map((c) => (
-        <ImportCard<ImportPreview>
-          key={c.type}
-          icon={c.icon}
-          titleKey={c.titleKey}
-          descKey={c.descKey}
-          readingKey="import.reading"
-          disabled={!canImport}
-          runPreview={(file) => api.imports.preview(c.type, file)}
-          runCommit={(file) => api.imports.commit(c.type, file)}
-          countsOf={(p) => p.counts}
-          renderPreview={(p) => <PreviewBody preview={p} />}
-        />
-      ))}
     </div>
   );
 }
