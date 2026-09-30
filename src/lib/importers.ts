@@ -244,7 +244,8 @@ function parseRepairs(grid: Grid): ParseResult {
     }
     // The workbook carries only number + customer; date and model stay as the
     // app has them (the repairs spec updates `client` only).
-    items.push({ fix, client: text(r[L.client]), __row: rowNo });
+    // Listed on the sheet = open: re-opens a ticket an earlier import closed (007).
+    items.push({ fix, client: text(r[L.client]), closed: false, __row: rowNo });
   }
   return { items, errors };
 }

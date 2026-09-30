@@ -164,6 +164,11 @@ export const MSG = {
     en: 'Choose a project or a repair ticket — not both',
     he: 'יש לבחור פרויקט או תיקון — לא את שניהם',
   },
+  // Was a hardcoded English sentence in routes/reports (client feedback round 3 #7).
+  'report.overTarget': {
+    en: '{nick} would have {total} hours on {date}, above the {target}-hour target. Confirm to continue.',
+    he: 'ל{nick} יהיו {total} שעות בתאריך {date}, מעל התקן של {target} שעות. לאשר ולהמשיך?',
+  },
 
   // ---- Excel import (WP §9) ------------------------------------------------
   'import.unknownType': {

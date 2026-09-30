@@ -194,14 +194,17 @@ const SPECS: Record<Exclude<ImportType, 'reports'>, TypeSpec> = {
     key: (it) => String(it.fix),
     // The workbook's repairs sheet has number + customer only (A, B): date and
     // model are left as they are rather than nulled.
-    fields: ['client'],
+    // `closed` is only ever false from the sheet (a listed ticket is open): a
+    // ticket closed by an earlier import comes back when it reappears (007).
+    fields: ['client', 'closed'],
     label: (it) => `${it.fix} · ${it.client}`,
-    load: async () => toMap(await query('SELECT fix, client FROM repairs'), (r) => String(r.fix)),
+    load: async () => toMap(await query('SELECT fix, client, closed FROM repairs'), (r) => String(r.fix)),
     apply: async (client, it) => {
       await client.query(
-        `INSERT INTO repairs (fix, client) VALUES ($1, $2)
-         ON CONFLICT (fix) DO UPDATE SET client = EXCLUDED.client`,
-        [it.fix, it.client]
+        `INSERT INTO repairs (fix, client, closed) VALUES ($1, $2, COALESCE($3::boolean, false))
+         ON CONFLICT (fix) DO UPDATE
+           SET client = EXCLUDED.client, closed = COALESCE($3::boolean, repairs.closed)`,
+        [it.fix, it.client, it.closed ?? null]
       );
     },
   },
@@ -238,8 +241,15 @@ const SPECS: Record<Exclude<ImportType, 'reports'>, TypeSpec> = {
 interface Diff {
   toApply: Item[];
   counts: { new: number; updated: number; unchanged: number; invalid: number };
-  rows: { status: 'new' | 'update' | 'unchanged'; label: string }[];
+  rows: { status: 'new' | 'update' | 'unchanged'; label: string; changes?: Change[] }[];
   errors: RowError[];
+}
+
+/** One changed column of an updated row — the preview shows "field: from → to". */
+interface Change {
+  field: string;
+  from: unknown;
+  to: unknown;
 }
 
 function parseType(req: { params: { type?: string } }): ImportType {
@@ -382,7 +392,10 @@ async function diffParsed(type: ImportType, parsed: ParseResult): Promise<Diff> 
     } else if (differs(spec.fields, it, ex)) {
       updN++;
       toApply.push(it);
-      rows.push({ status: 'update', label: spec.label(it) });
+      const changes = spec.fields
+        .filter((f) => f in it && norm(it[f]) !== norm(ex[f]))
+        .map((f) => ({ field: f, from: norm(ex[f]), to: norm(it[f]) }));
+      rows.push({ status: 'update', label: spec.label(it), changes });
     } else {
       sameN++;
       rows.push({ status: 'unchanged', label: spec.label(it) });
@@ -453,8 +466,10 @@ async function applyHistoryCreates(client: PoolClient, creates: HistoryResult['c
   );
   await inBatches(creates.repairs, (b) =>
     client.query(
-      `INSERT INTO repairs (fix, client)
-       SELECT * FROM unnest($1::int[], $2::text[])
+      // Closed: a ticket known only from history is not on the repairs sheet,
+      // so it must not be offered in the grid (client feedback round 3 #4).
+      `INSERT INTO repairs (fix, client, closed)
+       SELECT f, c, true FROM unnest($1::int[], $2::text[]) AS t(f, c)
        ON CONFLICT (fix) DO NOTHING`,
       [colOf(b, 'fix'), colOf(b, 'client')]
     )
@@ -480,17 +495,131 @@ async function applyDiff(client: PoolClient, type: ImportType, diff: Diff, userI
   });
 }
 
-const PREVIEW_ROWS_CAP = 200;
-const ERRORS_CAP = 100;
+/**
+ * The preview lists every row that will change (new + updated) so the user can
+ * review exactly what the commit adds — client feedback round 3 #8 ("shows
+ * strange items", "no addition/removal confirmation"). Unchanged rows are only
+ * counted, and so are report-history rows: there are ~200k of them.
+ */
+const PREVIEW_ROWS_CAP = 1000;
+const ERRORS_CAP = 500;
 
-const previewOf = (type: ImportType, diff: Diff) => ({
-  type,
-  counts: diff.counts,
-  rows: diff.rows.slice(0, PREVIEW_ROWS_CAP),
-  rowsTruncated: Math.max(0, diff.rows.length - PREVIEW_ROWS_CAP),
-  errors: diff.errors.slice(0, ERRORS_CAP),
-  errorsTruncated: Math.max(0, diff.errors.length - ERRORS_CAP),
-});
+const previewOf = (type: ImportType, diff: Diff, removals?: Removal[]) => {
+  const changed = type === 'reports' ? [] : diff.rows.filter((r) => r.status !== 'unchanged');
+  return {
+    type,
+    counts: diff.counts,
+    rows: changed.slice(0, PREVIEW_ROWS_CAP),
+    rowsTruncated: Math.max(0, changed.length - PREVIEW_ROWS_CAP),
+    errors: diff.errors.slice(0, ERRORS_CAP),
+    errorsTruncated: Math.max(0, diff.errors.length - ERRORS_CAP),
+    ...(removals ? { removals } : {}),
+  };
+};
+
+/* ------------------------------------------------------------- removals */
+
+/**
+ * Client feedback round 3 #3/#4: records that exist in the system but are no
+ * longer in the uploaded workbook are offered for REMOVAL in the preview, and
+ * only the ones the user confirms are removed. "Removed" is a flag, never a
+ * DELETE — past reports still reference these rows (FKs) and the history must
+ * stay intact:
+ *
+ *   employees → active = false   (out of the grid's employee suggestions)
+ *   projects  → archived = true  (out of the project suggestions, migration 006)
+ *   repairs   → closed = true    (out of the ticket suggestions, migration 007)
+ *
+ * A record that reappears in a later upload comes back: ProjectNum un-archives,
+ * the repairs sheet re-opens, and the employees' status column re-activates.
+ */
+type RemovableType = 'employees' | 'projects' | 'repairs';
+const REMOVABLE_TYPES: RemovableType[] = ['employees', 'projects', 'repairs'];
+const isRemovable = (t: string): t is RemovableType => (REMOVABLE_TYPES as string[]).includes(t);
+
+interface Removal {
+  key: number;
+  label: string;
+  /**
+   * Why this one may still be live, despite missing from the file — the office
+   * copy of the workbook can be OLDER than what was entered in the app since
+   * (first real import, 2026-09-30: it removed projects and tickets numbered
+   * above anything in the file, and a project reported the day before):
+   *   newer  — numbered above every record in the file
+   *   recent — hours reported against it in the last RECENT_DAYS days
+   */
+  warn?: ('newer' | 'recent')[];
+  /** Latest report date, when it has any. */
+  lastReport?: string | null;
+}
+
+const RECENT_DAYS = 30;
+
+const REMOVABLE: Record<RemovableType, { candidates: string; apply: string; label: (r: Item) => string }> = {
+  employees: {
+    candidates: `SELECT e.num AS key, e.nick, e.name,
+                        (SELECT max(date) FROM reports r WHERE r.emp_num = e.num)::text AS last_report
+                   FROM employees e WHERE e.active ORDER BY e.nick`,
+    apply: 'UPDATE employees SET active = false WHERE active AND num = ANY($1::int[])',
+    label: (r) => `${r.nick} · ${r.name} (${r.key})`,
+  },
+  projects: {
+    candidates: `SELECT p.num AS key, p.name,
+                        (SELECT max(date) FROM reports r WHERE r.proj_num = p.num)::text AS last_report
+                   FROM projects p WHERE NOT p.archived ORDER BY p.num`,
+    apply: 'UPDATE projects SET archived = true WHERE NOT archived AND num = ANY($1::int[])',
+    label: (r) => `${r.name} (${r.key})`,
+  },
+  repairs: {
+    // reports has no index on fix: one grouped scan, not a lookup per ticket.
+    candidates: `SELECT x.fix AS key, x.client, lr.last::text AS last_report
+                   FROM repairs x
+                   LEFT JOIN (SELECT fix, max(date) AS last FROM reports WHERE fix IS NOT NULL GROUP BY fix) lr
+                          ON lr.fix = x.fix
+                  WHERE NOT x.closed ORDER BY x.fix DESC`,
+    apply: 'UPDATE repairs SET closed = true WHERE NOT closed AND fix = ANY($1::int[])',
+    label: (r) => `${r.key}${r.client ? ` · ${r.client}` : ''}`,
+  },
+};
+
+/**
+ * Active records of `type` whose key is not in the file's list. An EMPTY list
+ * offers nothing: a blank sheet must never read as "remove everyone".
+ */
+async function removalCandidates(type: RemovableType, fileItems: Item[]): Promise<Removal[]> {
+  if (fileItems.length === 0) return [];
+  const inFile = new Set(fileItems.map((it) => SPECS[type].key(it)));
+  const fileMax = Math.max(...fileItems.map((it) => Number(SPECS[type].key(it))).filter(Number.isFinite));
+  const since = new Date(Date.now() - RECENT_DAYS * 86_400_000).toISOString().slice(0, 10);
+  const rows = await query<Item>(REMOVABLE[type].candidates);
+  return rows
+    .filter((r) => !inFile.has(String(r.key)))
+    .map((r) => {
+      const key = Number(r.key);
+      const last = (r.last_report as string | null) ?? null;
+      const warn: NonNullable<Removal['warn']> = [];
+      if (key > fileMax) warn.push('newer');
+      if (last && last >= since) warn.push('recent');
+      return { key, label: REMOVABLE[type].label(r), lastReport: last, ...(warn.length ? { warn } : {}) };
+    });
+}
+
+/** The commit's `remove` form field — JSON of the keys the user confirmed, per type. */
+function parseRemoveField(raw: unknown): Record<RemovableType, number[]> {
+  const out: Record<RemovableType, number[]> = { employees: [], projects: [], repairs: [] };
+  if (typeof raw !== 'string' || raw.trim() === '') return out;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw badRequest('error.invalidInput');
+  }
+  for (const type of REMOVABLE_TYPES) {
+    const list = (parsed as Record<string, unknown> | null)?.[type];
+    if (Array.isArray(list)) out[type] = list.map(Number).filter(Number.isInteger);
+  }
+  return out;
+}
 
 /* ------------------------------------------------- whole-workbook import */
 
@@ -510,7 +639,7 @@ const previewOf = (type: ImportType, diff: Diff) => ({
 type WorkbookSection = MasterType | 'reports';
 
 interface WorkbookDiff {
-  sections: { type: WorkbookSection; diff: Diff }[];
+  sections: { type: WorkbookSection; diff: Diff; removals?: Removal[] }[];
   creates: HistoryResult['creates'];
 }
 
@@ -532,7 +661,12 @@ async function diffWorkbook(buf: Buffer): Promise<WorkbookDiff> {
   if (parsed.every(isEmpty) && isEmpty(history)) throw badRequest('import.noRows');
   const sections: WorkbookDiff['sections'] = [];
   for (let i = 0; i < MASTER_TYPES.length; i++) {
-    sections.push({ type: MASTER_TYPES[i]!, diff: await diffParsed(MASTER_TYPES[i]!, parsed[i]!) });
+    const type = MASTER_TYPES[i]!;
+    sections.push({
+      type,
+      diff: await diffParsed(type, parsed[i]!),
+      ...(isRemovable(type) ? { removals: await removalCandidates(type, parsed[i]!.items) } : {}),
+    });
   }
   sections.push({ type: 'reports', diff: await diffParsed('reports', history) });
   return { sections, creates: history.creates };
@@ -562,7 +696,7 @@ importsRouter.post('/workbook/preview', uploadFile, async (req, res) => {
     data: {
       counts: sumCounts(sections),
       creates: createCounts(creates),
-      sections: sections.map(({ type, diff }) => previewOf(type, diff)),
+      sections: sections.map(({ type, diff, removals }) => previewOf(type, diff, removals)),
     },
   });
 });
@@ -570,11 +704,22 @@ importsRouter.post('/workbook/preview', uploadFile, async (req, res) => {
 importsRouter.post('/workbook/commit', uploadFile, async (req, res) => {
   if (!req.file) throw badRequest('import.noFile');
   const user = currentUser(req);
+  const requested = parseRemoveField(req.body?.remove);
   const { sections, creates } = await diffWorkbook(req.file.buffer);
   const counts = sumCounts(sections);
   const made = createCounts(creates);
 
-  if (counts.new + counts.updated > 0) {
+  // Only keys that are STILL removal candidates at commit time are removed: the
+  // preview may be stale, and a request can never flag an arbitrary record.
+  const toRemove: Record<RemovableType, number[]> = { employees: [], projects: [], repairs: [] };
+  for (const { type, removals } of sections) {
+    if (!removals || !isRemovable(type)) continue;
+    const want = new Set(requested[type]);
+    toRemove[type] = removals.filter((r) => want.has(r.key)).map((r) => r.key);
+  }
+  const removedTotal = REMOVABLE_TYPES.reduce((n, t) => n + toRemove[t].length, 0);
+
+  if (counts.new + counts.updated + removedTotal > 0) {
     await withTransaction(async (client) => {
       for (const { type, diff } of sections) {
         if (type === 'reports') {
@@ -584,14 +729,26 @@ importsRouter.post('/workbook/commit', uploadFile, async (req, res) => {
           await applyDiff(client, type, diff, user.id);
         }
       }
+      for (const type of REMOVABLE_TYPES) {
+        const keys = toRemove[type];
+        if (keys.length === 0) continue;
+        await client.query(REMOVABLE[type].apply, [keys]);
+        await logWith(client, {
+          userId: user.id,
+          action: ACTION.import,
+          detail: `${type} · removed ${keys.length}: ${keys.slice(0, 40).join(', ')}${keys.length > 40 ? ' …' : ''}`,
+          entityKey: type,
+        });
+      }
     });
   }
 
   res.json({
     data: {
-      applied: counts.new + counts.updated,
+      applied: counts.new + counts.updated + removedTotal,
       counts,
       creates: made,
+      removed: toRemove,
       sections: sections.map(({ type, diff }) => ({
         type,
         applied: diff.counts.new + diff.counts.updated,

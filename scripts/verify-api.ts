@@ -107,8 +107,9 @@ class Session {
   }
 
   /** Multipart upload, for the Excel import endpoints. */
-  async upload(path: string, buf: Buffer, filename = 'test.xlsx') {
+  async upload(path: string, buf: Buffer, filename = 'test.xlsx', fields: Record<string, string> = {}) {
     const fd = new FormData();
+    for (const [k, v] of Object.entries(fields)) fd.append(k, v);
     fd.append('file', new Blob([new Uint8Array(buf)]), filename);
     const headers: Record<string, string> = {};
     if (this.cookie) headers.cookie = this.cookie;
@@ -154,7 +155,7 @@ async function main() {
     // Order matters: reports reference employees and projects.
     await db.query(`DELETE FROM reports WHERE emp_num >= $1 OR proj_num >= $1`, [TEST_EMP_BASE]);
     await db.query(`DELETE FROM attendance WHERE emp_num >= $1`, [TEST_EMP_BASE]);
-    await db.query(`DELETE FROM submitted_days WHERE date IN ('2026-07-22','2026-07-23')`);
+    await db.query(`DELETE FROM submitted_days WHERE date IN ('2026-07-22','2026-07-23','1990-01-01')`);
     await db.query(`DELETE FROM activity_log WHERE user_id IN (SELECT id FROM users WHERE username LIKE $1)`, [`${TEST_PREFIX}%`]);
     await db.query(`DELETE FROM users WHERE username LIKE $1`, [`${TEST_PREFIX}%`]);
     await db.query(`DELETE FROM employees WHERE num >= $1`, [TEST_EMP_BASE]);
@@ -579,6 +580,11 @@ async function main() {
     check('filter by employee', byEmp.json.meta.totalRows, 2);
     const textSearch = await reporter.get('/api/reports?q=gridtest');
     checkTrue('free-text search matches the employee nickname', textSearch.json.meta.totalRows >= 2);
+    // The grid lists a day in entry order (client feedback round 3 #1).
+    const entryOrder = await reporter.get('/api/reports?date=2026-07-22&sort=id&dir=asc');
+    const entryIds = entryOrder.json.data.map((r: any) => Number(r.id));
+    check('sort=id lists a day in entry order', entryIds, [...entryIds].sort((a, b) => a - b));
+    check('  over-target message is from the catalogue (not hardcoded)', typeof overTarget.json.message, 'string');
     const searchWildcard = await reporter.get('/api/reports?q=%25');
     check('a literal % in search is not a wildcard', searchWildcard.json.meta.totalRows, 0);
     check(
@@ -618,7 +624,8 @@ async function main() {
     check('  records how many rows it covered', submitted.json.data.row_count, 2);
     check(
       'submitting an empty day -> 409',
-      (await reporter.post('/api/reports/submit-day', { date: '2019-01-01' })).status,
+      // 1990: before the report history (2012+) — guaranteed empty on the shared DB.
+      (await reporter.post('/api/reports/submit-day', { date: '1990-01-01' })).status,
       409
     );
     const stillEditable = await reporter.put(`/api/reports/${reportId}`, { hours: 4.5 });
@@ -798,7 +805,8 @@ async function main() {
     const WB_OLD_PROJ = TEST_EMP_BASE + 204; // in the history only — an old project
     const WB_OLD_FIX = TEST_EMP_BASE + 205; // in the history only — a repair ticket
     const hSerial = Math.round((Date.UTC(2026, 6, 25) - Date.UTC(1899, 11, 30)) / 86_400_000);
-    const hoursBook = (projName: string, client: string, oldProjListed = false) =>
+    const WB_FIX_NEW = TEST_EMP_BASE + 206; // replaces WB_FIX on the repairs sheet in the 4th upload
+    const hoursBook = (projName: string, client: string, oldProjListed = false, fixListed = true) =>
       bookBuf({
         // Report history, fixed columns A–J (lib/importers WORKBOOK_HISTORY).
         'דיווחי שעות': [
@@ -827,7 +835,7 @@ async function main() {
         ],
         repaires: [
           ["מס' תיקון", 'לקוח'], // the office's own spelling of the sheet name
-          [WB_FIX, client],
+          fixListed ? [WB_FIX, client] : [WB_FIX_NEW, client],
         ],
       });
 
@@ -887,6 +895,49 @@ async function main() {
     check('  an employee set inactive stays inactive', wbEmp2.rows[0]?.active, false);
     const wbFix2 = await db.query("SELECT client, to_char(date, 'YYYY-MM-DD') AS date, model FROM repairs WHERE fix = $1", [WB_FIX]);
     check('  repair: client updated, date + model kept', wbFix2.rows[0], { client: 'לקוח ב', date: '2026-01-02', model: 'וולבו' });
+
+    // Removal on confirmation (client feedback round 3 #3/#4). The shared DB
+    // holds REAL records that are "not in this test file" too — so the test only
+    // ever asks to remove test keys, and asserts a real record is never touched.
+    const histFix = await db.query('SELECT closed FROM repairs WHERE fix = $1', [WB_OLD_FIX]);
+    check('  a ticket known only from history is created closed', histFix.rows[0]?.closed, true);
+    const rmBook = hoursBook('פרויקט חוברת 2', 'לקוח ב', true, false); // WB_FIX dropped from the sheet
+    const rmPrev = await manager.upload('/api/import/workbook/preview', rmBook, 'hours.xlsm');
+    const rmSection = (type: string) => rmPrev.json.data.sections.find((x: any) => x.type === type);
+    const rmKeys = (type: string) => (rmSection(type).removals ?? []).map((r: any) => r.key);
+    checkTrue('  preview offers the dropped ticket for removal', rmKeys('repairs').includes(WB_FIX));
+    checkTrue('  and an active test employee missing from the sheet', rmKeys('employees').includes(IMP_A));
+    checkTrue('  but not a project the sheet still lists', !rmKeys('projects').includes(WB_OLD_PROJ));
+    checkTrue('  departments are never offered for removal', rmSection('departments').removals === undefined);
+    checkTrue('  preview lists only changed rows', rmSection('repairs').rows.every((r: any) => r.status !== 'unchanged'));
+    const realEmp = await db.query('SELECT num FROM employees WHERE active AND num < $1 ORDER BY num LIMIT 1', [TEST_EMP_BASE]);
+    const realNum: number | undefined = realEmp.rows[0]?.num;
+    const rmCommit = await manager.upload('/api/import/workbook/commit', rmBook, 'hours.xlsm', {
+      // WB_OLD_PROJ is listed in the file -> not a candidate -> must be ignored.
+      remove: JSON.stringify({ repairs: [WB_FIX], employees: [IMP_A], projects: [WB_OLD_PROJ] }),
+    });
+    check('  commit with confirmed removals -> 200', rmCommit.status, 200);
+    check('  removed exactly what was confirmed and is a candidate', rmCommit.json.data.removed, {
+      employees: [IMP_A],
+      projects: [],
+      repairs: [WB_FIX],
+    });
+    const rmFix = await db.query('SELECT closed FROM repairs WHERE fix = ANY($1) ORDER BY fix', [[WB_FIX, WB_FIX_NEW]]);
+    check('  dropped ticket closed, new ticket open', rmFix.rows.map((r: any) => r.closed), [true, false]);
+    const rmEmp = await db.query('SELECT active FROM employees WHERE num = $1', [IMP_A]);
+    check('  removed employee is inactive (not deleted)', rmEmp.rows[0]?.active, false);
+    const rmProj = await db.query('SELECT archived FROM projects WHERE num = $1', [WB_OLD_PROJ]);
+    check('  a non-candidate in the request is left alone', rmProj.rows[0]?.archived, false);
+    if (realNum != null) {
+      const stillActive = await db.query('SELECT active FROM employees WHERE num = $1', [realNum]);
+      check('  real records not confirmed are untouched', stillActive.rows[0]?.active, true);
+    }
+    const closedLookup = await manager.get(`/api/lookup/repairs?q=${WB_FIX}`);
+    check('  a closed ticket is not suggested in the grid', closedLookup.json.data.length, 0);
+    const reopen = await manager.upload('/api/import/workbook/commit', hoursBook('פרויקט חוברת 2', 'לקוח ב', true), 'hours.xlsm');
+    check('  re-listing the ticket re-opens it', reopen.status, 200);
+    const reopened = await db.query('SELECT closed FROM repairs WHERE fix = $1', [WB_FIX]);
+    check('  ticket open again', reopened.rows[0]?.closed, false);
 
     check(
       'a text file is rejected as unreadable -> 400',

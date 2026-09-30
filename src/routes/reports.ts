@@ -22,7 +22,7 @@ import { badRequest, conflict, notFound } from '../lib/errors.ts';
 import { resolveRow } from '../lib/resolve.ts';
 import { currentUser, requireRole } from '../middleware/auth.ts';
 import { ApiError } from '../lib/errors.ts';
-import { t } from '../lib/messages.ts';
+import { t, tf } from '../lib/messages.ts';
 
 export const reportsRouter = Router();
 
@@ -51,8 +51,10 @@ const listQuery = z.object({
   q: z.string().max(120).optional(),
   limit: z.coerce.number().int().min(1).max(1000).default(200),
   offset: z.coerce.number().int().min(0).default(0),
+  // `id` = entry order: the hours grid lists a day's rows in the order they were
+  // reported, so a new row stays at the bottom (client feedback round 3 #1).
   sort: z
-    .enum(['date', 'emp_nick', 'emp_name', 'proj_nick', 'proj_name', 'client', 'dept', 'hours', 'fix'])
+    .enum(['id', 'date', 'emp_nick', 'emp_name', 'proj_nick', 'proj_name', 'client', 'dept', 'hours', 'fix'])
     .default('date'),
   dir: z.enum(['asc', 'desc']).default('desc'),
 });
@@ -137,7 +139,7 @@ const createSchema = z.object({
   // input uses step=0.5, but rejecting anything else server-side would make the
   // Phase 3 bulk import fail on historical rows we have not seen yet.
   // See docs/OPEN-QUESTIONS.md.
-  hours: z.coerce.number().positive('Hours must be greater than zero').max(24),
+  hours: z.coerce.number().positive(t('field.positiveNumber')).max(24),
   /**
    * The prototype warns when a day's total would exceed the employee's target and
    * lets the user confirm (finalizeDraft, :505). That is a real rule the work plan
@@ -226,7 +228,7 @@ function overTargetError(
 ): ApiError {
   return new ApiError(
     409,
-    `${nick} would have ${newTotal} hours on ${date}, above the ${target}-hour target. Confirm to continue.`,
+    tf('report.overTarget', { nick, date, total: newTotal, target }),
     'over_target',
     { nick, date, newTotal, target }
   );

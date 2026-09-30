@@ -76,7 +76,10 @@ lookupRouter.get('/repairs', async (req, res) => {
   const rows = await query(
     `SELECT fix, client, date, model
        FROM repairs
-      WHERE $1 = '' OR fix::text LIKE $2 OR client ILIKE $2
+      -- Closed tickets (gone from the workbook's repairs sheet, migration 007)
+      -- are not offered for new reports.
+      WHERE NOT closed
+        AND ($1 = '' OR fix::text LIKE $2 OR client ILIKE $2)
       ORDER BY fix DESC
       LIMIT $3`,
     [q.trim(), likePattern(q), limit]

@@ -13,6 +13,7 @@ import {
 import { useEmployees, useReportMutations, useReports, useSubmittedDays } from '../api/hooks.ts';
 import { AutocompleteCell, type AcSuggestion } from '../components/AutocompleteCell.tsx';
 import { ConfirmDialog } from '../components/Modal.tsx';
+import { HoursSummary } from '../components/HoursSummary.tsx';
 import { useToast } from '../components/Toast.tsx';
 import { useT } from '../i18n/index.tsx';
 
@@ -21,7 +22,13 @@ import { useT } from '../i18n/index.tsx';
  * and the highest-risk thing to port. It reproduces the prototype's ergonomics
  * (`renderGrid`/`setupAC`/`finalizeDraft`/`saveExisting`, :367-535): a permanent
  * draft row at the bottom, autocomplete cells, keyboard traversal, live derived
- * columns and status dots, and the over-target confirmation.
+ * columns, and the over-target confirmation.
+ *
+ * Client feedback round 3 (2026-09-30): a day's rows are listed in ENTRY order
+ * (a new row stays at the bottom, #1); the green/yellow/red status dots are gone
+ * until the attendance clock drives them (#2); "+" on a row's employee / project
+ * cell copies it into the new row (#5); and "Hours summary" opens the per-
+ * employee day totals against the standard hours (#6).
  *
  * What changes for a multi-user server: resolution and the over-target rule are
  * the server's job, not the browser's. A create/update sends what the user typed;
@@ -30,7 +37,8 @@ import { useT } from '../i18n/index.tsx';
  * the authoritative row from the response (via query invalidation) replace it.
  */
 
-type StatusColor = 'g' | 'y' | 'r';
+/** Which cell's "+" was clicked: copy employee+department, or project/ticket+department. */
+type DuplicateKind = 'emp' | 'proj';
 
 /** One editable grid row. `id === null` is the always-present draft row. */
 interface GridModel {
@@ -146,7 +154,9 @@ export function ReportScreen() {
   const reports = useReports(
     showAll
       ? { limit: 1000, sort: 'date', dir: 'desc' }
-      : { date, limit: 1000, sort: 'emp_nick', dir: 'asc' }
+      : // Entry order, oldest first: a newly added row stays at the bottom
+        // instead of jumping into alphabetical place (client feedback round 3 #1).
+        { date, limit: 1000, sort: 'id', dir: 'asc' }
   );
   const employees = useEmployees(true);
   const submitted = useSubmittedDays({ from: date, to: date });
@@ -176,35 +186,44 @@ export function ReportScreen() {
     { message: string; onConfirm: () => void; onCancel?: (() => void) | undefined } | null
   >(null);
 
+  const [summaryOpen, setSummaryOpen] = useState(false);
+
   const rows = reports.data?.data ?? [];
 
-  /** Per-employee reported hours for the selected date, from the loaded rows. */
-  const statusOf = useMemo(() => {
-    const byEmp = new Map<number, number>();
-    if (!showAll) {
-      for (const r of rows) byEmp.set(r.emp_num, (byEmp.get(r.emp_num) ?? 0) + Number(r.hours));
-    }
-    const targetOf = new Map<number, number>();
-    for (const e of employees.data ?? []) targetOf.set(e.num, e.effective_target);
-    return (empNum: number | null): StatusColor | null => {
-      if (empNum == null || showAll) return null;
-      const h = byEmp.get(empNum) ?? 0;
-      const tgt = targetOf.get(empNum) ?? 0;
-      if (h <= 0) return 'r';
-      return h >= tgt - 0.001 ? 'g' : 'y';
-    };
-  }, [rows, employees.data, showAll]);
+  // The status dots (complete/partial/not reported vs the target) were removed:
+  // the client wants those colours driven by the attendance clock, which is not
+  // active yet (client feedback round 3 #2). The day's total stays as a plain count.
+  const dayHours = useMemo(() => rows.reduce((s, r) => s + Number(r.hours), 0), [rows]);
 
-  const dayStatus = useMemo(() => {
-    let g = 0, y = 0, r = 0;
-    for (const e of employees.data ?? []) {
-      const s = statusOf(e.num);
-      if (s === 'g') g++;
-      else if (s === 'y') y++;
-      else r++;
-    }
-    return { g, y, r };
-  }, [employees.data, statusOf]);
+  /**
+   * "+" on a row (client feedback round 3 #5): copy that row's employee +
+   * department — or project/ticket + department — into the new-entry row, so a
+   * run of rows for one employee (or one project) needs only the rest typed.
+   * Only the copied fields are overwritten; anything already typed in the new
+   * row is kept. Focus lands on the first empty cell.
+   */
+  const duplicate = (kind: DuplicateKind, m: GridModel) => {
+    setDraft((d) => ({
+      ...d,
+      date: m.date,
+      deptText: m.deptText,
+      dept_num: m.dept_num,
+      unresolved: [],
+      ...(kind === 'emp'
+        ? { empText: m.empText, emp_num: m.emp_num, emp_name: m.emp_name }
+        : // Both halves of the exactly-one pair are copied, so a ticket row
+          // never lands next to a project already typed in the draft.
+          { projText: m.projText, proj_num: m.proj_num, proj_name: m.proj_name, fixText: m.fixText, fix: m.fix }),
+    }));
+    setTimeout(() => {
+      const inputs = [
+        ...document.querySelectorAll<HTMLInputElement>('tr.draft [data-grid-input]:not([disabled])'),
+      ].slice(1); // skip the date cell
+      const target = inputs.find((el) => el.value.trim() === '') ?? inputs[0];
+      target?.scrollIntoView({ block: 'nearest' });
+      target?.focus();
+    }, 30);
+  };
 
   const isSubmitted = (submitted.data ?? []).some((s) => s.date === date);
 
@@ -227,8 +246,21 @@ export function ReportScreen() {
       onDone();
     } catch (err) {
       if (err instanceof ApiError && err.code === 'over_target') {
+        // Built from the details in the UI's language — the server's sentence
+        // used to be hardcoded English (client feedback round 3 #7).
+        const d = err.details as unknown as
+          | { nick?: string; date?: string; newTotal?: number; target?: number }
+          | undefined;
         setConfirm({
-          message: err.message,
+          message:
+            d?.nick != null && d.newTotal != null && d.target != null
+              ? t('report.overTarget', {
+                  nick: d.nick,
+                  date: d.date ?? '',
+                  total: Number(d.newTotal),
+                  target: Number(d.target),
+                })
+              : err.message,
           onConfirm: () => {
             setConfirm(null);
             void run(true)
@@ -344,6 +376,11 @@ export function ReportScreen() {
             {showAll ? t('report.showOneDay') : t('report.allDates')}
           </button>
           <div style={{ flex: 1 }} />
+          {!showAll && (
+            <button className="btn sm ghost" onClick={() => setSummaryOpen(true)}>
+              {t('report.summary.button')}
+            </button>
+          )}
           <a
             className="btn sm ghost"
             href={exportUrl('report', showAll ? {} : { date })}
@@ -363,12 +400,7 @@ export function ReportScreen() {
             <b>{t('report.rowsAllDates', { n: reports.data?.meta.totalRows ?? rows.length })}</b>
           ) : (
             <>
-              <span className="dot g" />
-              {dayStatus.g} {t('report.complete')} &nbsp;
-              <span className="dot y" />
-              {dayStatus.y} {t('report.partial')} &nbsp;
-              <span className="dot r" />
-              {dayStatus.r} {t('report.notReported')}
+              {t('report.dayTotals', { n: rows.length, h: Math.round(dayHours * 100) / 100 })}
               {isSubmitted && <span className="badge-new" style={{ marginInlineStart: 8 }}>{t('report.submitted')}</span>}
             </>
           )}
@@ -405,7 +437,7 @@ export function ReportScreen() {
                     key={r.id}
                     mode="existing"
                     seed={r}
-                    statusOf={statusOf}
+                    onDuplicate={showAll ? undefined : duplicate}
                     onSave={saveExisting}
                     onDelete={(id) =>
                       setConfirm({
@@ -429,7 +461,6 @@ export function ReportScreen() {
                     mode="draft"
                     draft={draft}
                     setDraft={setDraft}
-                    statusOf={statusOf}
                     onCommit={commitDraft}
                   />
                 )}
@@ -457,6 +488,16 @@ export function ReportScreen() {
         />
       )}
 
+      {summaryOpen && (
+        <HoursSummary
+          date={date}
+          rows={rows}
+          employees={employees.data ?? []}
+          loading={reports.isLoading || employees.isLoading}
+          onClose={() => setSummaryOpen(false)}
+        />
+      )}
+
       {toast.node}
     </>
   );
@@ -468,7 +509,8 @@ type RowProps =
   | {
       mode: 'existing';
       seed: ReportRow;
-      statusOf: (empNum: number | null) => StatusColor | null;
+      /** Absent in the all-dates view, which has no new-entry row to copy into. */
+      onDuplicate?: ((kind: DuplicateKind, m: GridModel) => void) | undefined;
       onSave: (m: GridModel, onError: () => void) => void;
       onDelete: (id: number) => void;
     }
@@ -476,9 +518,26 @@ type RowProps =
       mode: 'draft';
       draft: GridModel;
       setDraft: React.Dispatch<React.SetStateAction<GridModel>>;
-      statusOf: (empNum: number | null) => StatusColor | null;
       onCommit: () => void;
     };
+
+/** The small "+" inside a cell. mousedown is swallowed so the click never
+ *  steals focus from (or blurs into) the grid's inputs mid-edit. */
+function DupButton({ title, onClick }: { title: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      className="dup-btn"
+      title={title}
+      aria-label={title}
+      tabIndex={-1}
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={onClick}
+    >
+      +
+    </button>
+  );
+}
 
 function RowEditor(props: RowProps) {
   const t = useT();
@@ -579,7 +638,15 @@ function RowEditor(props: RowProps) {
   const empMiss = model.unresolved.includes('emp');
   const projMiss = model.unresolved.includes('proj');
   const projName = model.proj_name ?? (model.fix != null ? t('report.repairLabel', { n: model.fix }) : '');
-  const status = props.statusOf(model.emp_num);
+
+  const onDuplicate = props.mode === 'existing' ? props.onDuplicate : undefined;
+  const dupEmp =
+    onDuplicate && model.empText.trim() ? (
+      <DupButton title={t('report.dup.emp')} onClick={() => onDuplicate('emp', modelRef.current)} />
+    ) : null;
+  const dupProj = onDuplicate ? (
+    <DupButton title={t('report.dup.proj')} onClick={() => onDuplicate('proj', modelRef.current)} />
+  ) : null;
 
   // Exactly one of project / ticket (client feedback #3, #5 — confirms WP §4.5):
   // filling either locks the other, and keyboard traversal skips the locked cell.
@@ -612,7 +679,7 @@ function RowEditor(props: RowProps) {
       {/* Employee (autocomplete) */}
       <AutocompleteCell<Employee>
         value={model.empText}
-        adornment={status ? <span className={`dot ${status}`} /> : null}
+        adornment={dupEmp}
         search={empSuggest}
         onType={(text) => update({ empText: text, emp_num: null, emp_name: '' })}
         onPick={(e) => update({ empText: e.nick, emp_num: e.num, emp_name: e.name, unresolved: model.unresolved.filter((u) => u !== 'emp') })}
@@ -628,6 +695,7 @@ function RowEditor(props: RowProps) {
       <AutocompleteCell<Project>
         value={model.projText}
         disabled={projDisabled}
+        adornment={projFilled ? dupProj : null}
         search={projSuggest}
         onType={(text) => update({ projText: text, proj_num: null, proj_name: null })}
         onPick={(p) =>
@@ -651,6 +719,8 @@ function RowEditor(props: RowProps) {
       <AutocompleteCell<Repair>
         value={model.fixText}
         disabled={fixDisabled}
+        // A ticket row's "+" sits on the ticket: it copies ticket + department.
+        adornment={fixFilled && !projFilled ? dupProj : null}
         search={fixSuggest}
         onType={(text) =>
           update({

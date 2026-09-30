@@ -71,6 +71,34 @@ td.actcell{text-align:center;width:36px;background:#fff;}
 .tag{font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px;margin-inline-start:5px;}
 .tag.add{background:#e4f6e7;color:#137333;} .tag.upd{background:#fff4d6;color:#8a6d00;} .tag.same{background:#eef1f7;color:#667;}
 .tag.err{background:#fdecea;color:#c5221f;}
+.tag.rem{background:#fde8d7;color:#a14a00;}
+.imp-section{padding:8px 0;border-bottom:1px solid var(--line);}
+.imp-section .t{font-size:.95em;margin-bottom:4px;}
+.imp-list{margin:6px 0;font-size:12.5px;}
+.imp-list summary{cursor:pointer;font-weight:600;}
+.imp-list ul{margin:4px 0;padding-inline-start:18px;max-height:220px;overflow-y:auto;}
+.imp-list li{margin:2px 0;}
+.imp-list.rem summary{color:#a14a00;}
+.imp-list.err summary{color:#c5221f;}
+.imp-change{margin-inline-end:8px;}
+.imp-warn{margin-inline-start:8px;font-size:11px;color:#a14a00;font-weight:600;}
+.imp-summary{margin:10px 0 8px;font-weight:700;}
+
+/* "+" duplicate button inside a grid cell (client feedback round 3 #5) */
+.dup-btn{width:18px;height:18px;line-height:16px;padding:0;border:1px solid #b9c4da;border-radius:50%;background:#fff;color:#1a56db;font-weight:700;font-size:13px;cursor:pointer;opacity:.55;}
+.dup-btn:hover{opacity:1;background:#e8effd;}
+tr:hover .dup-btn{opacity:1;}
+
+/* Hours summary (client feedback round 3 #6) */
+/* table.xl's 1050px min-width is for the hours grid; inside the dialog it cut
+   the last columns off (found by the round-3 acceptance screenshots). */
+table.xl.sum-table{width:100%;min-width:0;font-size:12.5px;}
+table.xl.sum-table td{padding:5px 8px;height:auto;}
+.sum-table tr.sum-over td{background:#fdecea;}
+.sum-table tr.sum-missing td,.sum-table tr.sum-under td{background:#fff6d6;}
+.sum-chip{padding:2px 8px;border-radius:10px;font-weight:600;}
+.sum-chip.over{background:#fdecea;color:#c5221f;}
+.sum-chip.missing,.sum-chip.under{background:#fff6d6;color:#8a6d00;}
 ::-webkit-scrollbar{width:10px;height:10px;}::-webkit-scrollbar-thumb{background:#c7d0e0;border-radius:5px;}
 .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#1e7e34;color:#fff;padding:11px 20px;border-radius:9px;font-weight:600;box-shadow:0 4px 16px rgba(0,0,0,.25);z-index:999;opacity:0;transition:.3s;}
 .toast.show{opacity:1;}

@@ -1,3 +1,5 @@
+import { STRINGS } from '../i18n/strings.ts';
+
 /**
  * The only place in the front end that talks to the server.
  *
@@ -40,6 +42,16 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Client-side error text in the UI language. These used to be hardcoded English
+ * (client feedback round 3 #7): what shows when the server is unreachable or
+ * answers with something that is not the API (e.g. nginx's 502 page mid-deploy).
+ */
+function local(key: 'common.network' | 'common.badResponse' | 'common.requestFailed', status = 0): string {
+  const e = STRINGS[key];
+  return (document.documentElement.lang === 'en' ? e.en : e.he).replace('{n}', String(status));
+}
+
 interface Envelope<T> {
   data: T;
   count?: number;
@@ -54,7 +66,7 @@ async function parseResponse<T>(res: Response): Promise<T> {
     try {
       parsed = JSON.parse(text);
     } catch {
-      throw new ApiError(res.status, 'bad_response', 'The server returned an unreadable response.');
+      throw new ApiError(res.status, 'bad_response', local('common.badResponse'));
     }
   }
 
@@ -63,7 +75,7 @@ async function parseResponse<T>(res: Response): Promise<T> {
     throw new ApiError(
       res.status,
       err.error ?? 'error',
-      err.message ?? `Request failed (${res.status})`,
+      err.message ?? local('common.requestFailed', res.status),
       err.details
     );
   }
@@ -84,20 +96,21 @@ async function requestRaw<T>(method: string, path: string, body?: unknown): Prom
     });
   } catch {
     // fetch only rejects on a transport failure, never on a 4xx/5xx.
-    throw new ApiError(0, 'network', 'Cannot reach the server. Check your connection.');
+    throw new ApiError(0, 'network', local('common.network'));
   }
   return parseResponse<T>(res);
 }
 
 /** Multipart upload — the browser sets the content-type (with its boundary) itself. */
-async function requestUpload<T>(path: string, file: File): Promise<T> {
+async function requestUpload<T>(path: string, file: File, fields: Record<string, string> = {}): Promise<T> {
   const fd = new FormData();
+  for (const [k, v] of Object.entries(fields)) fd.append(k, v);
   fd.append('file', file);
   let res: Response;
   try {
     res = await fetch(path, { method: 'POST', credentials: 'same-origin', body: fd });
   } catch {
-    throw new ApiError(0, 'network', 'Cannot reach the server. Check your connection.');
+    throw new ApiError(0, 'network', local('common.network'));
   }
   return parseResponse<T>(res);
 }
@@ -186,6 +199,8 @@ export interface Repair {
   client: string;
   date: string | null;
   model: string | null;
+  /** Off the workbook's repairs sheet — not offered in the grid (migration 007). */
+  closed: boolean;
 }
 
 export interface UserAccount {
@@ -275,7 +290,7 @@ export interface ReportListParams {
   q?: string;
   limit?: number;
   offset?: number;
-  sort?: 'date' | 'emp_nick' | 'emp_name' | 'proj_nick' | 'proj_name' | 'client' | 'dept' | 'hours' | 'fix';
+  sort?: 'id' | 'date' | 'emp_nick' | 'emp_name' | 'proj_nick' | 'proj_name' | 'client' | 'dept' | 'hours' | 'fix';
   dir?: 'asc' | 'desc';
 }
 
@@ -412,14 +427,37 @@ export interface ImportRowError {
   reason: string;
 }
 
+/** One changed column of an updated row. */
+export interface ImportChange {
+  field: string;
+  from: unknown;
+  to: unknown;
+}
+
+/** A record in the system that is not in the uploaded file — removable on confirmation. */
+export interface ImportRemoval {
+  key: number;
+  label: string;
+  /** Signs it may still be live: numbered above the file's records / hours in the last 30 days. */
+  warn?: ('newer' | 'recent')[];
+  lastReport?: string | null;
+}
+
 export interface ImportPreview {
   type: ImportType;
   counts: ImportCounts;
-  rows: { status: 'new' | 'update' | 'unchanged'; label: string }[];
+  /** Only the rows that change (new + update); unchanged rows are just counted. */
+  rows: { status: 'new' | 'update' | 'unchanged'; label: string; changes?: ImportChange[] }[];
   rowsTruncated: number;
   errors: ImportRowError[];
   errorsTruncated: number;
+  /** Workbook employees/projects/repairs only. */
+  removals?: ImportRemoval[];
 }
+
+/** Types whose missing records can be removed (deactivated / archived / closed). */
+export type RemovableType = 'employees' | 'projects' | 'repairs';
+export type ImportRemoveRequest = Partial<Record<RemovableType, number[]>>;
 
 export interface ImportCommitResult {
   type: ImportType;
@@ -449,6 +487,7 @@ export interface WorkbookCommitResult {
   applied: number;
   counts: ImportCounts;
   creates: WorkbookCreates;
+  removed: Record<RemovableType, number[]>;
   sections: { type: WorkbookSection; applied: number; counts: ImportCounts }[];
 }
 
@@ -608,8 +647,10 @@ export const api = {
       requestUpload<{ data: ImportCommitResult }>(`/api/import/${type}/commit`, file).then((r) => r.data),
     workbookPreview: (file: File) =>
       requestUpload<{ data: WorkbookPreview }>('/api/import/workbook/preview', file).then((r) => r.data),
-    workbookCommit: (file: File) =>
-      requestUpload<{ data: WorkbookCommitResult }>('/api/import/workbook/commit', file).then((r) => r.data),
+    workbookCommit: (file: File, remove: ImportRemoveRequest = {}) =>
+      requestUpload<{ data: WorkbookCommitResult }>('/api/import/workbook/commit', file, {
+        remove: JSON.stringify(remove),
+      }).then((r) => r.data),
   },
 
   activity: {

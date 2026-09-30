@@ -6,13 +6,15 @@ interface Props {
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
+  /** Wide dialog (e.g. a table) up to this many px; omitted = the default form size. */
+  width?: number;
 }
 
 /**
  * Overlay dialog. Reuses the prototype's .confirm-ov / .confirm-box styling so it
  * looks the same as the dialogs the users already know.
  */
-export function Modal({ title, onClose, children, footer }: Props) {
+export function Modal({ title, onClose, children, footer, width }: Props) {
   const box = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -38,7 +40,7 @@ export function Modal({ title, onClose, children, footer }: Props) {
         ref={box}
         role="dialog"
         aria-modal="true"
-        style={{ maxWidth: 420, textAlign: 'start' }}
+        style={{ maxWidth: width ?? 420, ...(width ? { width: '100%' } : {}), textAlign: 'start' }}
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="confirm-msg">{title}</div>

@@ -178,6 +178,8 @@ const repairCreate = z.object({
     .nullish()
     .transform((v) => v ?? null),
   model: optionalText(80),
+  // Closed = no longer on the workbook's repairs sheet (migration 007).
+  closed: z.boolean().default(false),
 });
 
 masterRouter.use(
@@ -186,15 +188,15 @@ masterRouter.use(
     table: 'repairs',
     key: 'fix',
     keyKind: 'int',
-    select: ['fix', 'client', 'date', 'model'],
-    insertable: ['fix', 'client', 'date', 'model'],
-    updatable: ['client', 'date', 'model'],
+    select: ['fix', 'client', 'date', 'model', 'closed'],
+    insertable: ['fix', 'client', 'date', 'model', 'closed'],
+    updatable: ['client', 'date', 'model', 'closed'],
     createSchema: repairCreate,
     updateSchema: repairCreate.partial().omit({ fix: true }),
     writeRoles: MASTER_WRITE,
     entity: ENTITY.repair,
     label: (r) => `${r.fix}${r.client ? ` · ${r.client}` : ''}`,
-    orderBy: 'fix DESC',
+    orderBy: 'closed, fix DESC',
   })
 );
 

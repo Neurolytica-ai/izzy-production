@@ -77,6 +77,8 @@ export function MasterScreen({ role }: { role: Role }) {
   // ~2,450 old projects come in with the report history (archived); listing
   // them all by default would bury the live ones.
   const [showArchived, setShowArchived] = useState(false);
+  // Same for tickets the workbook import closed (migration 007).
+  const [showClosed, setShowClosed] = useState(false);
 
   const creators = {
     employees: useCreateEmployee(),
@@ -154,6 +156,7 @@ export function MasterScreen({ role }: { role: Role }) {
       { key: 'client', label: t('field.rep.client') },
       { key: 'date', label: t('field.rep.date'), type: 'date' },
       { key: 'model', label: t('field.rep.model') },
+      { key: 'closed', label: t('field.rep.closed'), type: 'bool' },
     ],
   };
 
@@ -221,6 +224,8 @@ export function MasterScreen({ role }: { role: Role }) {
   const archivedCount = (projects.data ?? []).filter((p) => p.archived).length;
   const shownProjects = (projects.data ?? []).filter((p) => showArchived || !p.archived);
   const clients = new Set(productive.map((p) => p.client));
+  const closedCount = (repairs.data ?? []).filter((r) => r.closed).length;
+  const shownRepairs = (repairs.data ?? []).filter((r) => showClosed || !r.closed);
 
   return (
     <>
@@ -364,10 +369,18 @@ export function MasterScreen({ role }: { role: Role }) {
         <div style={{ flex: 1, minWidth: 320 }}>
           <Section
             title={t('master.section.repairs')}
-            count={repairs.data?.length}
+            count={repairs.data ? shownRepairs.length : undefined}
             query={repairs}
             onAdd={canWrite ? () => setEditing({ entity: 'repairs', record: null }) : undefined}
             addLabel={t('master.add.repair')}
+            note={
+              closedCount > 0 && (
+                <label className="mini" style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                  <input type="checkbox" checked={showClosed} onChange={(e) => setShowClosed(e.target.checked)} />
+                  {t('master.showClosed', { n: closedCount })}
+                </label>
+              )
+            }
           >
             <table className="xl" style={{ fontSize: 12.5, minWidth: 320 }}>
               <thead>
@@ -380,9 +393,12 @@ export function MasterScreen({ role }: { role: Role }) {
                 </tr>
               </thead>
               <tbody>
-                {(repairs.data ?? []).map((r) => (
+                {shownRepairs.map((r) => (
                   <tr key={r.fix}>
-                    <td className="derived">{r.fix}</td>
+                    <td className="derived">
+                      {r.fix}
+                      {r.closed && <span className="mini"> {t('master.closed')}</span>}
+                    </td>
                     <td className="derived" style={{ textAlign: 'start' }}>
                       {r.client}
                     </td>
