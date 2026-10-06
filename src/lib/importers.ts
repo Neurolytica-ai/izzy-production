@@ -516,7 +516,7 @@ export interface HistoryLookups {
 
 export async function historyLookups(file: Record<MasterType, Item[]>): Promise<HistoryLookups> {
   const [emps, projs, depts, fixes] = await Promise.all([
-    query<{ num: number; nick: string; name: string }>('SELECT num, nick, name FROM employees'),
+    query<{ num: number; nick: string; name: string }>('SELECT num, nick, name FROM employees ORDER BY active DESC, num'),
     query<{ num: number }>('SELECT num FROM projects'),
     query<{ name: string; num: number | null }>('SELECT name, num FROM departments'),
     query<{ fix: number }>('SELECT fix FROM repairs'),
@@ -529,13 +529,20 @@ export async function historyLookups(file: Record<MasterType, Item[]>): Promise<
     deptByName: new Map(),
     deptByNum: new Map(),
   };
-  const addEmp = (num: number, name: string, nick: string) => {
-    L.empNums.add(num);
-    if (nick && !L.empByName.has(nick)) L.empByName.set(nick, num);
-    if (name && !L.empByName.has(name)) L.empByName.set(name, num);
-  };
-  for (const e of emps) addEmp(e.num, e.name, e.nick);
-  for (const e of file.employees) addEmp(e.num as number, e.name as string, e.nick as string);
+  // A history row without an employee number resolves by the typed name. That
+  // must give the same answer on every upload of the same file, so the order is
+  // fixed: FULL names before nicknames, and the office's Employees sheet before
+  // the database (itself read in a fixed order). Otherwise a former employee
+  // created from history — nick = first word of his name ("אנדריי" for
+  // "אנדריי איגנטב") — could capture another employee's rows on the next upload,
+  // re-importing them under the wrong person (found 2026-10-06).
+  const people = [
+    ...(file.employees as { num: number; name: string; nick: string }[]),
+    ...emps,
+  ];
+  for (const e of people) L.empNums.add(e.num);
+  for (const e of people) if (e.name && !L.empByName.has(e.name)) L.empByName.set(e.name, e.num);
+  for (const e of people) if (e.nick && !L.empByName.has(e.nick)) L.empByName.set(e.nick, e.num);
   for (const p of file.projects) L.projNums.add(p.num as number);
   for (const r of file.repairs) L.fixes.add(r.fix as number);
   // The file's departments are applied first in the same commit, so they count.
@@ -570,6 +577,18 @@ export function parseHistory(grid: Grid, known: HistoryLookups): HistoryResult {
   const newFixes = new Map<number, Item>();
   const items: Item[] = [];
   const errors: RowError[] = [];
+
+  // A former employee's rows without a number can sit ABOVE the first row that
+  // carries it (the sheet is not strictly ordered). Learn every new number→name
+  // pair up front, so a name-only row resolves the same wherever it sits — and
+  // the same on the first upload as on the next (found 2026-10-06: 135 rows
+  // rejected on the first import were picked up by the second).
+  for (let i = h + 1; i < grid.length; i++) {
+    const r = grid[i] ?? [];
+    const num = asInt(r[L.empNum]);
+    const name = text(r[L.emp]);
+    if (num != null && name && !known.empNums.has(num) && !known.empByName.has(name)) known.empByName.set(name, num);
+  }
 
   for (let i = h + 1; i < grid.length; i++) {
     const r = grid[i] ?? [];
@@ -651,11 +670,7 @@ export function parseHistory(grid: Grid, known: HistoryLookups): HistoryResult {
       dept = dn != null ? known.deptByNum.get(dn) ?? null : null;
     }
 
-    if (newEmp) {
-      newEmps.set(emp_num, newEmp);
-      // A later row of the same person may lack the number (column I blank).
-      if (!known.empByName.has(newEmp.name as string)) known.empByName.set(newEmp.name as string, emp_num);
-    }
+    if (newEmp) newEmps.set(emp_num, newEmp);
     if (newProj) newProjs.set(proj_num!, newProj);
     if (newFix) newFixes.set(fix!, newFix);
     items.push({ date, emp_num, proj_num, fix, dept, hours, __row: rowNo });
