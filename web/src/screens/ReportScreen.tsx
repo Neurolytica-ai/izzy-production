@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   api,
   ApiError,
@@ -29,6 +29,12 @@ import { useT } from '../i18n/index.tsx';
  * until the attendance clock drives them (#2); "+" on a row's employee / project
  * cell copies it into the new row (#5); and "Hours summary" opens the per-
  * employee day totals against the standard hours (#6).
+ *
+ * Client feedback round 4 (2026-10-06): rows have no date cell of their own —
+ * every row of the day view is on the date chosen at the top (#4; the all-dates
+ * view still shows each row's date, read-only) — and the day's list stays
+ * anchored to its bottom row on load, after a new row and on returning from
+ * another tab (#5).
  *
  * What changes for a multi-user server: resolution and the over-target rule are
  * the server's job, not the browser's. A create/update sends what the user typed;
@@ -62,6 +68,32 @@ function todayISO(): string {
   const d = new Date();
   const z = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}`;
+}
+
+/**
+ * The chosen day survives a trip to another tab (the screen unmounts) — with
+ * the date now set only at the top, landing back on today would silently move
+ * the user's next rows to the wrong day. Kept for the browser session, and only
+ * on the day it was chosen: a tab left open overnight starts the morning on today.
+ */
+const DATE_KEY = 'izy.report.date';
+
+function rememberedDate(): string {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(DATE_KEY) ?? 'null') as { on?: string; date?: string } | null;
+    if (saved?.on === todayISO() && saved.date && /^\d{4}-\d{2}-\d{2}$/.test(saved.date)) return saved.date;
+  } catch {
+    /* storage blocked or garbled — fall back to today */
+  }
+  return todayISO();
+}
+
+function rememberDate(date: string) {
+  try {
+    sessionStorage.setItem(DATE_KEY, JSON.stringify({ on: todayISO(), date }));
+  } catch {
+    /* not worth failing entry over */
+  }
 }
 
 function emptyDraft(date: string): GridModel {
@@ -148,8 +180,9 @@ const fixSuggest = (q: string): Promise<AcSuggestion<Repair>[]> =>
 export function ReportScreen() {
   const t = useT();
   const toast = useToast();
-  const [date, setDate] = useState(todayISO);
+  const [date, setDate] = useState(rememberedDate);
   const [showAll, setShowAll] = useState(false);
+  useEffect(() => rememberDate(date), [date]);
 
   const reports = useReports(
     showAll
@@ -162,12 +195,16 @@ export function ReportScreen() {
   const submitted = useSubmittedDays({ from: date, to: date });
   const mut = useReportMutations();
 
-  // The draft row's date follows the selected date while the user has not typed
-  // into it, matching the prototype (renderGrid, :368).
+  // The new-entry row has no date cell (client feedback round 4 #4): it is
+  // always on the date chosen at the top, including a row typed before the
+  // date was changed. commitDraft also reads the date through a ref, so a commit
+  // racing a date change cannot land on the previous day.
   const [draft, setDraft] = useState<GridModel>(() => emptyDraft(date));
   useEffect(() => {
-    setDraft((d) => (d.empText || d.projText || d.hours || d.deptText || d.fixText ? d : emptyDraft(date)));
+    setDraft((d) => (d.date === date ? d : { ...d, date }));
   }, [date]);
+  const dateRef = useRef(date);
+  dateRef.current = date;
 
   // commitDraft can be invoked from a stale closure (a suggestion pick defers the
   // commit past its own state update), so it must read the draft through a ref —
@@ -196,6 +233,39 @@ export function ReportScreen() {
   const dayHours = useMemo(() => rows.reduce((s, r) => s + Number(r.hours), 0), [rows]);
 
   /**
+   * Bottom anchoring (client feedback round 4 #5). The day's rows are in entry
+   * order with the new-entry row last, so the bottom is where work happens. The
+   * list scrolls there:
+   *  - when a day's rows first arrive — screen load, a date change, and the
+   *    return from another tab (the screen remounts; the rows come from cache);
+   *  - when the list grows — a row was added. The refetch lands after the
+   *    create's own callback, so the row count is the signal, not the callback.
+   * Not after an edit or a delete (the count does not grow), and not while the
+   * cursor is in an older row: a colleague's row arriving by refetch must not
+   * scroll the row being edited out of view. The all-dates view is newest-first
+   * and is left alone.
+   */
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const anchor = useRef<{ view: string | null; count: number }>({ view: null, count: 0 });
+  const view = showAll ? null : date;
+  const settled = reports.data != null && !reports.isPlaceholderData;
+  useLayoutEffect(() => {
+    if (view == null) {
+      anchor.current = { view: null, count: 0 };
+      return;
+    }
+    if (!settled) return; // still showing the previous day's rows
+    const first = anchor.current.view !== view;
+    const grew = !first && rows.length > anchor.current.count;
+    anchor.current = { view, count: rows.length };
+    const el = scrollRef.current;
+    if (!el || !(first || grew)) return;
+    const active = document.activeElement;
+    if (grew && active && el.contains(active) && !active.closest('tr.draft')) return;
+    el.scrollTop = el.scrollHeight;
+  }, [view, settled, rows.length]);
+
+  /**
    * "+" on a row (client feedback round 3 #5): copy that row's employee +
    * department — or project/ticket + department — into the new-entry row, so a
    * run of rows for one employee (or one project) needs only the rest typed.
@@ -205,7 +275,6 @@ export function ReportScreen() {
   const duplicate = (kind: DuplicateKind, m: GridModel) => {
     setDraft((d) => ({
       ...d,
-      date: m.date,
       deptText: m.deptText,
       dept_num: m.dept_num,
       unresolved: [],
@@ -218,7 +287,7 @@ export function ReportScreen() {
     setTimeout(() => {
       const inputs = [
         ...document.querySelectorAll<HTMLInputElement>('tr.draft [data-grid-input]:not([disabled])'),
-      ].slice(1); // skip the date cell
+      ];
       const target = inputs.find((el) => el.value.trim() === '') ?? inputs[0];
       target?.scrollIntoView({ block: 'nearest' });
       target?.focus();
@@ -295,10 +364,10 @@ export function ReportScreen() {
 
   const commitDraft = () => {
     if (committing.current) return; // a create is already in flight — do not double-submit
-    const d = draftRef.current;
-    // A half-edited date input yields '' — sent as-is the server answers a bare
-    // "invalid input" and the user is stuck (client feedback #7, the red toast
-    // in the screenshot). Catch it here with a message that names the problem.
+    const d = { ...draftRef.current, date: dateRef.current };
+    // A half-edited date input (now the one at the top) yields '' — sent as-is
+    // the server answers a bare "invalid input" and the user is stuck (client
+    // feedback #7). Catch it here with a message that names the problem.
     if (!/^\d{4}-\d{2}-\d{2}$/.test(d.date)) {
       toast.show(t('report.badDate'), 'error');
       return;
@@ -411,11 +480,14 @@ export function ReportScreen() {
             {reports.error instanceof Error ? reports.error.message : t('common.failedToLoad')}
           </div>
         ) : (
-          <div className="xl-scroll">
+          <div className="xl-scroll" ref={scrollRef}>
             <table className="xl">
               <thead>
                 <tr>
-                  <th style={{ minWidth: 110 }}>{t('report.th.date')}</th>
+                  {/* Rows carry no date in the day view — the date at the top
+                      is theirs (round 4 #4). The all-dates view mixes days, so
+                      there each row's date is shown, read-only. */}
+                  {showAll && <th style={{ minWidth: 100 }}>{t('report.th.date')}</th>}
                   <th style={{ minWidth: 100 }}>{t('report.th.employee')}</th>
                   {/* Ticket sits right next to Project (client feedback #2) — the
                       pair is an either/or choice and reads as one. */}
@@ -437,6 +509,7 @@ export function ReportScreen() {
                     key={r.id}
                     mode="existing"
                     seed={r}
+                    showDate={showAll}
                     onDuplicate={showAll ? undefined : duplicate}
                     onSave={saveExisting}
                     onDelete={(id) =>
@@ -509,6 +582,8 @@ type RowProps =
   | {
       mode: 'existing';
       seed: ReportRow;
+      /** All-dates view only: the row's own date, read-only. */
+      showDate: boolean;
       /** Absent in the all-dates view, which has no new-entry row to copy into. */
       onDuplicate?: ((kind: DuplicateKind, m: GridModel) => void) | undefined;
       onSave: (m: GridModel, onError: () => void) => void;
@@ -658,23 +733,12 @@ function RowEditor(props: RowProps) {
 
   return (
     <tr className={isDraft ? 'draft' : ''}>
-      {/* Date */}
-      <td>
-        <input
-          data-grid-input
-          type="date"
-          dir="ltr"
-          value={model.date}
-          onChange={(e) => update({ date: e.target.value })}
-          onBlur={saveIfExisting}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              e.preventDefault();
-              (e.currentTarget.closest('tr')?.querySelectorAll<HTMLElement>('[data-grid-input]')[1])?.focus();
-            }
-          }}
-        />
-      </td>
+      {/* Date — no cell in the day view (round 4 #4); read-only in all-dates */}
+      {props.mode === 'existing' && props.showDate && (
+        <td className="derived" dir="ltr">
+          {model.date}
+        </td>
+      )}
 
       {/* Employee (autocomplete) */}
       <AutocompleteCell<Employee>
