@@ -15,14 +15,15 @@
  *
  * Role: manager/admin (WP §8 — imports are a manager capability).
  */
-import { Router, type Request, type RequestHandler, type Response } from 'express';
+import { Router, type Request, type RequestHandler } from 'express';
 import multer from 'multer';
 import type { PoolClient } from 'pg';
 import { promisify } from 'node:util';
-import { gunzip } from 'node:zlib';
-import { query, withTransaction } from '../lib/db.ts';
+import { gunzip, gzip } from 'node:zlib';
+import { z } from 'zod';
+import { query, queryOne, withTransaction } from '../lib/db.ts';
 import { ACTION, logWith } from '../lib/activity.ts';
-import { badRequest, badRequestText } from '../lib/errors.ts';
+import { badRequest, badRequestText, notFound } from '../lib/errors.ts';
 import {
   IMPORT_TYPES,
   MASTER_TYPES,
@@ -46,6 +47,7 @@ import { extractWorkbook, isWorkbookExtract } from '../lib/workbook-extract.ts';
 import type { WorkbookExtract } from '../lib/workbook-shape.ts';
 
 const gunzipAsync = promisify(gunzip);
+const gzipAsync = promisify(gzip);
 
 export const importsRouter = Router();
 
@@ -650,6 +652,9 @@ type WorkbookSection = MasterType | 'reports';
 interface WorkbookDiff {
   sections: { type: WorkbookSection; diff: Diff; removals?: Removal[] }[];
   creates: HistoryResult['creates'];
+  /** Every parsed history row (new or not), with its Excel row in `__row` — the sources for duplicated rows (#3). */
+  history: Item[];
+  fileMasters: Record<MasterType, Item[]>;
 }
 
 /**
@@ -669,7 +674,7 @@ function stageTimer(label: string, t0: number) {
     },
     done(outcome: string) {
       const total = ((performance.now() - t0) / 1000).toFixed(1);
-      console.log(`[import] ${label} ${outcome} ${total}s · ${laps.join(' · ')}`);
+      console.log(`[import] ${label} ${outcome} ${total}s${laps.length ? ` · ${laps.join(' · ')}` : ''}`);
     },
   };
 }
@@ -747,7 +752,7 @@ async function diffWorkbook(extract: WorkbookExtract, timer: StageTimer): Promis
   timer.lap('diff-masters');
   sections.push({ type: 'reports', diff: await diffParsed('reports', history) });
   timer.lap('diff-reports');
-  return { sections, creates: history.creates };
+  return { sections, creates: history.creates, history: history.items, fileMasters };
 }
 
 const sumCounts = (sections: { diff: Diff }[]): Diff['counts'] =>
@@ -788,22 +793,20 @@ importsRouter.post('/workbook/preview', startClock, uploadFile, async (req, res)
   }
 });
 
-importsRouter.post('/workbook/commit', startClock, uploadFile, async (req, res) => {
-  const timer = stageTimer('workbook/commit', res.locals.t0 as number);
-  timer.lap('receive');
-  let outcome = 'failed';
-  try {
-    outcome = await commitWorkbook(req, res, timer);
-  } finally {
-    timer.done(outcome);
-  }
-});
-
-async function commitWorkbook(req: Request, res: Response, timer: StageTimer): Promise<string> {
-  const user = currentUser(req);
-  const requested = parseRemoveField(req.body?.remove);
-  const { extract, via } = await workbookExtract(req, timer);
-  const { sections, creates } = await diffWorkbook(extract, timer);
+/**
+ * Applies a workbook diff in ONE transaction, in FK order: master lists, the
+ * records the history needs, the history rows, then the duplicated rows (#3),
+ * then the confirmed removals. `inTx` runs last inside the same transaction
+ * (the draft commit deletes the draft there, so approve-and-forget is atomic).
+ */
+async function applyWorkbook(
+  wd: WorkbookDiff,
+  requested: Record<RemovableType, number[]>,
+  added: Item[],
+  userId: number,
+  inTx?: (client: PoolClient) => Promise<unknown>
+) {
+  const { sections, creates } = wd;
   const counts = sumCounts(sections);
   const made = createCounts(creates);
 
@@ -816,47 +819,299 @@ async function commitWorkbook(req: Request, res: Response, timer: StageTimer): P
     toRemove[type] = removals.filter((r) => want.has(r.key)).map((r) => r.key);
   }
   const removedTotal = REMOVABLE_TYPES.reduce((n, t) => n + toRemove[t].length, 0);
+  const applied = counts.new + counts.updated + removedTotal + added.length;
 
-  if (counts.new + counts.updated + removedTotal > 0) {
+  if (applied > 0 || inTx) {
     await withTransaction(async (client) => {
       for (const { type, diff } of sections) {
         if (type === 'reports') {
           await applyHistoryCreates(client, creates);
-          await applyDiff(client, type, diff, user.id, ` · created emp ${made.employees} proj ${made.projects} fix ${made.repairs}`);
+          await applyDiff(client, type, diff, userId, ` · created emp ${made.employees} proj ${made.projects} fix ${made.repairs}`);
         } else {
-          await applyDiff(client, type, diff, user.id);
+          await applyDiff(client, type, diff, userId);
         }
+      }
+      if (added.length > 0) {
+        await insertReports(client, added, userId);
+        await logWith(client, {
+          userId,
+          action: ACTION.import,
+          detail: `reports · duplicated ${added.length} row(s) in the import review`,
+          entityKey: 'reports',
+        });
       }
       for (const type of REMOVABLE_TYPES) {
         const keys = toRemove[type];
         if (keys.length === 0) continue;
         await client.query(REMOVABLE[type].apply, [keys]);
         await logWith(client, {
-          userId: user.id,
+          userId,
           action: ACTION.import,
           detail: `${type} · removed ${keys.length}: ${keys.slice(0, 40).join(', ')}${keys.length > 40 ? ' …' : ''}`,
           entityKey: type,
         });
       }
+      await inTx?.(client);
     });
   }
-  timer.lap('write');
 
-  res.json({
-    data: {
-      applied: counts.new + counts.updated + removedTotal,
-      counts,
-      creates: made,
-      removed: toRemove,
-      sections: sections.map(({ type, diff }) => ({
-        type,
-        applied: diff.counts.new + diff.counts.updated,
-        counts: diff.counts,
-      })),
-    },
-  });
-  return `ok via ${via} applied ${counts.new + counts.updated + removedTotal}`;
+  return {
+    applied,
+    counts,
+    creates: made,
+    removed: toRemove,
+    duplicated: added.length,
+    sections: sections.map(({ type, diff }) => ({
+      type,
+      applied: diff.counts.new + diff.counts.updated,
+      counts: diff.counts,
+    })),
+  };
 }
+
+/** One-shot commit of an uploaded workbook — kept for clients from before the drafts (#2). */
+importsRouter.post('/workbook/commit', startClock, uploadFile, async (req, res) => {
+  const timer = stageTimer('workbook/commit', res.locals.t0 as number);
+  timer.lap('receive');
+  let outcome = 'failed';
+  try {
+    const user = currentUser(req);
+    const requested = parseRemoveField(req.body?.remove);
+    const { extract, via } = await workbookExtract(req, timer);
+    const result = await applyWorkbook(await diffWorkbook(extract, timer), requested, [], user.id);
+    timer.lap('write');
+    res.json({ data: result });
+    outcome = `ok via ${via} applied ${result.applied}`;
+  } finally {
+    timer.done(outcome);
+  }
+});
+
+/* ---------------------------------------------- pending import drafts */
+
+/**
+ * Client feedback round 4 #2: an uploaded workbook waits for approval on the
+ * SERVER (table import_drafts, migration 008), one per user — so it survives
+ * switching tabs and refreshing, until it is approved, cancelled (#2's "Cancel")
+ * or expires. And #3: the review lists the new hours rows, and the user may
+ * duplicate any of them with the employee left to fill in; those choices are
+ * kept in the draft too.
+ *
+ *   POST   /workbook/draft            upload (extract or raw file) → review
+ *   GET    /workbook/draft            the pending review, or null
+ *   PUT    /workbook/draft/choices    save removal ticks + duplicated rows
+ *   DELETE /workbook/draft            cancel
+ *   POST   /workbook/draft/commit     approve: re-check against the database, apply
+ *
+ * Approval re-diffs the stored extract rather than replaying the stored preview,
+ * so what is applied is current even if data changed while the draft waited.
+ */
+const DRAFT_TTL_MINUTES = 120;
+
+/** New history rows listed in the review for duplication (#3) — newest first. */
+const NEW_ROWS_CAP = 2000;
+
+const removeLists = z
+  .object({
+    employees: z.array(z.number().int()).max(20_000),
+    projects: z.array(z.number().int()).max(20_000),
+    repairs: z.array(z.number().int()).max(20_000),
+  })
+  .partial();
+
+const draftChoices = z.object({
+  remove: removeLists.default({}),
+  /**
+   * Duplicated rows: `src` = the Excel row copied, `emp` = the employee filled in
+   * (null until chosen). `label` is only what the employee cell shows after a
+   * refresh — the commit uses `emp` alone.
+   */
+  added: z
+    .array(
+      z.object({
+        id: z.string().min(1).max(40),
+        src: z.number().int().positive(),
+        emp: z.number().int().positive().nullable(),
+        label: z.string().max(120).default(''),
+      })
+    )
+    .max(5000)
+    .default([]),
+});
+type DraftChoices = z.infer<typeof draftChoices>;
+
+const toRequested = (r: DraftChoices['remove']): Record<RemovableType, number[]> => ({
+  employees: r.employees ?? [],
+  projects: r.projects ?? [],
+  repairs: r.repairs ?? [],
+});
+
+/**
+ * The new history rows, newest first, with what the review shows for each —
+ * employee nick/name and project name come from the database, the file's lists,
+ * or the records this import will create.
+ */
+async function newHoursRows(wd: WorkbookDiff) {
+  const reports = wd.sections.find((s) => s.type === 'reports')!.diff.toApply;
+  const rows = [...reports]
+    .sort((a, b) => String(b.date).localeCompare(String(a.date)) || (b.__row as number) - (a.__row as number))
+    .slice(0, NEW_ROWS_CAP);
+  const [emps, projs] = await Promise.all([
+    query<{ num: number; nick: string; name: string }>('SELECT num, nick, name FROM employees'),
+    query<{ num: number; name: string }>('SELECT num, name FROM projects'),
+  ]);
+  const emp = new Map<number, { nick: string; name: string }>();
+  for (const e of [...emps, ...wd.fileMasters.employees, ...wd.creates.employees] as { num: number; nick: string; name: string }[]) {
+    emp.set(e.num, { nick: e.nick, name: e.name });
+  }
+  const proj = new Map<number, string>();
+  for (const p of [...projs, ...wd.fileMasters.projects, ...wd.creates.projects] as { num: number; name: string }[]) {
+    proj.set(p.num, p.name);
+  }
+  return {
+    newRows: rows.map((r) => ({
+      row: r.__row as number,
+      date: r.date as string,
+      emp_num: r.emp_num as number,
+      emp_nick: emp.get(r.emp_num as number)?.nick ?? String(r.emp_num),
+      emp_name: emp.get(r.emp_num as number)?.name ?? '',
+      proj_num: (r.proj_num as number | null) ?? null,
+      proj_name: r.proj_num != null ? proj.get(r.proj_num as number) ?? null : null,
+      fix: (r.fix as number | null) ?? null,
+      dept: (r.dept as string | null) ?? null,
+      hours: Number(r.hours),
+    })),
+    newRowsTotal: reports.length,
+  };
+}
+
+/**
+ * Duplicated rows as report rows to insert: every value copied from the file's
+ * row (never from the request), only the employee is the user's. Each must name
+ * an employee that exists — in the database, the file's list, or this import's
+ * own creates (applied earlier in the same transaction).
+ */
+async function duplicatedRows(added: DraftChoices['added'], wd: WorkbookDiff): Promise<Item[]> {
+  if (added.length === 0) return [];
+  const missing = added.filter((a) => a.emp == null).length;
+  if (missing > 0) throw badRequestText(tf('import.dupNeedsEmployee', { n: missing }));
+  const known = new Set<number>([
+    ...(await query<{ num: number }>('SELECT num FROM employees')).map((e) => e.num),
+    ...wd.fileMasters.employees.map((e) => e.num as number),
+    ...wd.creates.employees.map((e) => e.num as number),
+  ]);
+  const bySrc = new Map(wd.history.map((it) => [it.__row as number, it]));
+  return added.map((a) => {
+    const src = bySrc.get(a.src);
+    if (!src) throw badRequestText(tf('import.dupBadSource', { n: a.src }));
+    if (!known.has(a.emp!)) throw badRequestText(tf('import.dupBadEmployee', { n: a.emp! }));
+    return { date: src.date, emp_num: a.emp, proj_num: src.proj_num, fix: src.fix, dept: src.dept, hours: src.hours };
+  });
+}
+
+/** Drafts past their expiry are dead weight (bytea) — cleared whenever drafts are touched. */
+const purgeExpiredDrafts = () => query('DELETE FROM import_drafts WHERE expires_at <= now()');
+
+const DRAFT_VIEW = `file_name AS "fileName", created_at AS "createdAt", updated_at AS "updatedAt",
+                    expires_at AS "expiresAt", preview, choices`;
+
+importsRouter.post('/workbook/draft', startClock, uploadFile, async (req, res) => {
+  const timer = stageTimer('workbook/draft', res.locals.t0 as number);
+  timer.lap('receive');
+  let outcome = 'failed';
+  try {
+    const user = currentUser(req);
+    const { extract, via } = await workbookExtract(req, timer);
+    const wd = await diffWorkbook(extract, timer);
+    const rows = await newHoursRows(wd);
+    const preview = {
+      counts: sumCounts(wd.sections),
+      creates: createCounts(wd.creates),
+      sections: wd.sections.map(({ type, diff, removals }) => previewOf(type, diff, removals)),
+      ...rows,
+    };
+    // What the browser sent is already the gzipped extract; a raw upload is
+    // extracted here and stored the same way (~2 MB rather than ~34 MB).
+    const gz = via === 'browser' ? req.file!.buffer : await gzipAsync(JSON.stringify(extract));
+    const name = typeof req.body?.fileName === 'string' && req.body.fileName.trim() ? req.body.fileName.trim().slice(0, 200) : 'workbook';
+    timer.lap('preview');
+    await purgeExpiredDrafts();
+    const draft = await queryOne(
+      `INSERT INTO import_drafts (user_id, file_name, extract_gz, preview, expires_at)
+       VALUES ($1, $2, $3, $4, now() + make_interval(mins => $5))
+       ON CONFLICT (user_id) DO UPDATE
+         SET file_name = EXCLUDED.file_name, extract_gz = EXCLUDED.extract_gz, preview = EXCLUDED.preview,
+             choices = '{}'::jsonb, created_at = now(), updated_at = now(), expires_at = EXCLUDED.expires_at
+       RETURNING ${DRAFT_VIEW}`,
+      [user.id, name, gz, JSON.stringify(preview), DRAFT_TTL_MINUTES]
+    );
+    timer.lap(`store(${(gz.length / 1e6).toFixed(1)}MB)`);
+    res.status(201).json({ data: draft });
+    outcome = `ok via ${via}`;
+  } finally {
+    timer.done(outcome);
+  }
+});
+
+importsRouter.get('/workbook/draft', async (req, res) => {
+  const user = currentUser(req);
+  await purgeExpiredDrafts();
+  const draft = await queryOne(`SELECT ${DRAFT_VIEW} FROM import_drafts WHERE user_id = $1`, [user.id]);
+  res.json({ data: draft });
+});
+
+/** Saving a choice also extends the draft: it expires 2 hours after the LAST change. */
+importsRouter.put('/workbook/draft/choices', async (req, res) => {
+  const user = currentUser(req);
+  const choices = draftChoices.parse(req.body?.choices ?? {});
+  const saved = await queryOne(
+    `UPDATE import_drafts
+        SET choices = $2, updated_at = now(), expires_at = now() + make_interval(mins => $3)
+      WHERE user_id = $1 AND expires_at > now()
+      RETURNING updated_at AS "updatedAt", expires_at AS "expiresAt"`,
+    [user.id, JSON.stringify(choices), DRAFT_TTL_MINUTES]
+  );
+  if (!saved) throw notFound('import.draftNotFound');
+  res.json({ data: saved });
+});
+
+importsRouter.delete('/workbook/draft', async (req, res) => {
+  const user = currentUser(req);
+  await query('DELETE FROM import_drafts WHERE user_id = $1', [user.id]);
+  res.status(204).end();
+});
+
+importsRouter.post('/workbook/draft/commit', startClock, async (req, res) => {
+  const timer = stageTimer('workbook/draft/commit', res.locals.t0 as number);
+  let outcome = 'failed';
+  try {
+    const user = currentUser(req);
+    const draft = await queryOne<{ extract_gz: Buffer; choices: unknown }>(
+      'SELECT extract_gz, choices FROM import_drafts WHERE user_id = $1 AND expires_at > now()',
+      [user.id]
+    );
+    if (!draft) throw notFound('import.draftNotFound');
+    const choices = draftChoices.parse(draft.choices ?? {});
+    let extract: unknown;
+    try {
+      extract = JSON.parse((await gunzipAsync(draft.extract_gz, { maxOutputLength: EXTRACT_MAX_BYTES })).toString('utf8'));
+    } catch {
+      throw badRequest('import.badFile');
+    }
+    if (!isWorkbookExtract(extract)) throw badRequest('import.badFile');
+    timer.lap('load');
+    const wd = await diffWorkbook(extract, timer);
+    const added = await duplicatedRows(choices.added, wd);
+    const result = await applyWorkbook(wd, toRequested(choices.remove), added, user.id, (client) =>
+      client.query('DELETE FROM import_drafts WHERE user_id = $1', [user.id])
+    );
+    timer.lap('write');
+    res.json({ data: result });
+    outcome = `ok applied ${result.applied} (duplicated ${added.length})`;
+  } finally {
+    timer.done(outcome);
+  }
+});
 
 /* ------------------------------------------------------- per-type routes */
 

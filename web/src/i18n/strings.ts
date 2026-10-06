@@ -367,6 +367,51 @@ export const STRINGS = {
     he: 'בודק את הנתונים מול המערכת…',
   },
   'import.elapsed': { en: '{s}s', he: '{s} שניות' },
+  'import.stage.cancel': { en: 'Stop', he: 'עצור' },
+
+  // Pending upload kept on the server (client feedback round 4 #2)
+  'import.draft.pending': {
+    en: 'Waiting for approval: {file} · uploaded at {at} · kept until {until}',
+    he: 'ממתין לאישור: {file} · הועלה ב-{at} · נשמר עד {until}',
+  },
+  'import.draft.cancel': { en: '✕ Cancel this upload', he: '✕ בטל טעינה זו' },
+  'import.draft.cancelConfirm': {
+    en: 'Cancel the pending upload? Nothing from it has been saved, and you can upload a file again.',
+    he: 'לבטל את הטעינה הממתינה? דבר ממנה לא נשמר, ואפשר לטעון קובץ מחדש.',
+  },
+  'import.draft.cancelled': { en: 'Upload cancelled', he: 'הטעינה בוטלה' },
+  'import.draft.blocked': {
+    en: 'An upload is waiting for approval — approve it or cancel it to upload another file.',
+    he: 'טעינה ממתינה לאישור — יש לאשר או לבטל אותה כדי לטעון קובץ אחר.',
+  },
+  'import.draft.expired': {
+    en: 'The pending upload has expired — please upload the file again.',
+    he: 'תוקף הטעינה הממתינה פג — יש לטעון את הקובץ מחדש.',
+  },
+
+  // New hours rows + duplication in the review (client feedback round 4 #3)
+  'import.rows.title': { en: 'New hours rows ({n})', he: 'שורות שעות חדשות ({n})' },
+  'import.rows.truncated': {
+    en: 'Showing the newest {shown} of {n}.',
+    he: 'מוצגות {shown} השורות האחרונות מתוך {n}.',
+  },
+  'import.rows.hint': {
+    en: 'Select rows and duplicate them — a copy keeps everything except the employee, which you fill in.',
+    he: 'יש לסמן שורות ולשכפל אותן — העותק שומר הכל מלבד העובד, אותו יש למלא.',
+  },
+  'import.rows.filter': { en: 'Filter rows…', he: 'סינון שורות…' },
+  'import.rows.duplicate': { en: '⧉ Duplicate selected ({n})', he: '⧉ שכפל נבחרות ({n})' },
+  'import.rows.selectAll': { en: 'Select all shown rows', he: 'סמן את כל השורות המוצגות' },
+  'import.rows.select': { en: 'Select row', he: 'סמן שורה' },
+  'import.rows.copy': { en: 'copy', he: 'עותק' },
+  'import.rows.remove': { en: 'Remove this duplicated row', he: 'הסר שורה משוכפלת' },
+  'import.rows.pickEmployee': { en: 'Employee…', he: 'עובד…' },
+  'import.rows.needEmployee': {
+    en: '{n} duplicated rows still need an employee',
+    he: '{n} שורות משוכפלות עדיין ללא עובד',
+  },
+  'import.rows.none': { en: 'No new hours rows in this file.', he: 'אין שורות שעות חדשות בקובץ.' },
+  'import.review.dup': { en: ' · {n} duplicated rows', he: ' · {n} שורות משוכפלות' },
   'import.review.intro': {
     en: 'Review the changes below. Nothing is saved until you confirm.',
     he: 'יש לעבור על השינויים שלהלן. דבר לא נשמר עד לאישור.',

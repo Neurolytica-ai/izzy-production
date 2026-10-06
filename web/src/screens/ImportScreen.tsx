@@ -1,29 +1,31 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   api,
+  ApiError,
+  type DraftChoices,
+  type DuplicatedRow,
+  type Employee,
   type ImportChange,
+  type ImportDraft,
+  type ImportNewRow,
   type ImportPreview,
-  type ImportRemoveRequest,
   type RemovableType,
   type Role,
   type WorkbookCommitResult,
   type WorkbookPreview,
   type WorkbookSection,
-  type WorkbookUpload,
 } from '../api/client.ts';
+import { keys, useImportDraft } from '../api/hooks.ts';
+import { AutocompleteCell, type AcSuggestion } from '../components/AutocompleteCell.tsx';
 import { ConfirmDialog } from '../components/Modal.tsx';
 import { useToast } from '../components/Toast.tsx';
 import { useT } from '../i18n/index.tsx';
 import type { StringKey } from '../i18n/strings.ts';
-import { extractInBrowser } from '../lib/extractInBrowser.ts';
+import { cancelImport, clearImportError, startImport, useImportJob } from '../lib/importJob.ts';
 
 /**
- * WP §6.5 / §9 — Excel import, preview-then-commit. Choosing a file uploads it
- * for a PREVIEW (nothing written); confirming posts the very same file again to
- * commit — the server re-parses and re-diffs, so what is applied is exactly what
- * was previewed even if someone else changed data in between (anything now
- * unchanged is simply skipped).
+ * WP §6.5 / §9 — Excel import, preview-then-commit.
  *
  * ONE upload (Arad, 2026-09-29): the office's hours workbook, דיווח שעות.xlsm,
  * carries the four master lists and the report history ("דיווחי שעות"), and the
@@ -36,10 +38,16 @@ import { extractInBrowser } from '../lib/extractInBrowser.ts';
  * summary confirmation is accepted. "Removed" = deactivated / archived / closed
  * on the server, never deleted — past reports keep pointing at them.
  *
- * Client feedback round 4 #1 (≤60s): the browser reads the 34 MB workbook
- * itself (a Web Worker) and uploads only what the import uses, ~2 MB — the
- * upload was most of the wait. If the browser cannot read it, the file itself is
- * uploaded as before. Preview and commit send the same upload.
+ * Client feedback round 4 (2026-10-06):
+ *   #1 the browser reads the 34 MB workbook itself and uploads ~2 MB (lib/importJob);
+ *   #2 the uploaded, unapproved review is kept ON THE SERVER (one per user) — it
+ *      survives switching tabs and refreshing until approved, cancelled, or
+ *      expired; the user's ticks and duplicated rows are saved with it. "Cancel
+ *      this upload" discards it so another file can be uploaded;
+ *   #3 the new hours rows are listed, and any of them can be duplicated: the copy
+ *      keeps everything but the employee, which the user fills in.
+ * Approval re-checks the stored upload against the database (server side), so
+ * what is applied is current even if the data changed while it waited.
  */
 
 const SECTION_TITLE: Record<WorkbookSection, StringKey> = {
@@ -71,10 +79,16 @@ const FIELD_LABEL: Record<string, StringKey> = {
 
 const ACCEPT = '.xlsx,.xlsm,.xls';
 
+const REMOVABLE: RemovableType[] = ['employees', 'projects', 'repairs'];
 const isRemovable = (t: WorkbookSection): t is RemovableType =>
   t === 'employees' || t === 'projects' || t === 'repairs';
 
-type Selection = Record<RemovableType, Set<number>>;
+/** extract = reading in this browser; server = server building the review; upload = fallback, sending the whole file. */
+const STAGE_TEXT: Record<'extract' | 'server' | 'upload', StringKey> = {
+  extract: 'import.stage.extract',
+  server: 'import.stage.server',
+  upload: 'import.readingWorkbook',
+};
 
 /**
  * Nothing starts ticked: removal is opt-in, record by record (or "remove all").
@@ -82,25 +96,24 @@ type Selection = Record<RemovableType, Set<number>>;
  * workbook was older than the app's data, and a pre-ticked list removed
  * projects and tickets that were still in use.
  */
-function initialSelection(): Selection {
-  return { employees: new Set(), projects: new Set(), repairs: new Set() };
+const NO_CHOICES: DraftChoices = { remove: {}, added: [] };
+
+function normalize(c: Partial<DraftChoices> | undefined): DraftChoices {
+  return {
+    remove: c?.remove ?? {},
+    added: (c?.added ?? []).map((a) => ({ id: a.id, src: a.src, emp: a.emp ?? null, label: a.label ?? '' })),
+  };
 }
 
-/** extract = reading in this browser; server = server checking the extract; upload = fallback, sending the whole file. */
-type ReadingStage = 'extract' | 'server' | 'upload';
+const newId = () =>
+  typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
 
-const STAGE_TEXT: Record<ReadingStage, StringKey> = {
-  extract: 'import.stage.extract',
-  server: 'import.stage.server',
-  upload: 'import.readingWorkbook',
-};
+const hhmm = (iso: string) => new Date(iso).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
 
-type State =
-  | { phase: 'idle' }
-  | { phase: 'reading'; stage: ReadingStage; since: number }
-  | { phase: 'preview'; upload: WorkbookUpload; preview: WorkbookPreview }
-  | { phase: 'committing'; upload: WorkbookUpload; preview: WorkbookPreview }
-  | { phase: 'done'; result: WorkbookCommitResult };
+/** Everything an import can change — refreshed after approval. */
+const AFFECTED = ['employees', 'projects', 'departments', 'standard', 'repairs', 'reports', 'submittedDays', 'activity'];
 
 export function ImportScreen({ role }: { role: Role }) {
   const t = useT();
@@ -108,95 +121,159 @@ export function ImportScreen({ role }: { role: Role }) {
   const qc = useQueryClient();
   const canImport = role === 'manager' || role === 'admin';
   const inputRef = useRef<HTMLInputElement>(null);
-  const [state, setState] = useState<State>({ phase: 'idle' });
+  const job = useImportJob();
+  const draftQ = useImportDraft(canImport);
+  const draft = draftQ.data ?? null;
   const [failure, setFailure] = useState<string | null>(null);
-  const [selection, setSelection] = useState<Selection>(initialSelection);
-  const [confirming, setConfirming] = useState(false);
+  const [done, setDone] = useState<WorkbookCommitResult | null>(null);
+  const [confirming, setConfirming] = useState<'commit' | 'cancel' | null>(null);
+  const [busy, setBusy] = useState(false);
 
-  // The in-browser read of the current file; aborted (worker terminated) on a
-  // new choice, on cancel, and when the screen unmounts.
-  const reading = useRef<AbortController | null>(null);
-  useEffect(() => () => reading.current?.abort(), []);
+  /* ---- the user's choices: mirrored locally, saved to the draft on the server */
 
-  const reset = () => {
-    reading.current?.abort();
-    setState({ phase: 'idle' });
-    setFailure(null);
-    if (inputRef.current) inputRef.current.value = '';
-  };
-
-  const choose = async (file: File | undefined) => {
-    if (!file) return;
-    reading.current?.abort();
-    const ctl = new AbortController();
-    reading.current = ctl;
-    setFailure(null);
-    const since = Date.now();
-    setState({ phase: 'reading', stage: 'extract', since });
-    try {
-      let upload: WorkbookUpload;
-      try {
-        upload = { kind: 'extract', blob: await extractInBrowser(file, ctl.signal) };
-        setState({ phase: 'reading', stage: 'server', since });
-      } catch (e) {
-        if (ctl.signal.aborted) return;
-        // An old browser, or a PC short on memory: send the file itself —
-        // slower, same result (the server extracts it with the same code).
-        console.warn('[import] reading the workbook in the browser failed; uploading the file', e);
-        upload = { kind: 'file', file };
-        setState({ phase: 'reading', stage: 'upload', since });
-      }
-      const preview = await api.imports.workbookPreview(upload);
-      if (ctl.signal.aborted) return;
-      setSelection(initialSelection());
-      setState({ phase: 'preview', upload, preview });
-    } catch (e) {
-      if (ctl.signal.aborted) return;
-      reset();
-      setFailure(e instanceof Error ? e.message : t('import.failed'));
+  const [choices, setChoices] = useState<DraftChoices>(NO_CHOICES);
+  const choicesRef = useRef(choices);
+  choicesRef.current = choices;
+  // Re-seeded only when a DIFFERENT draft arrives (a refetch of the same one
+  // must not undo ticks made since the last save).
+  const seededFor = useRef<string | null>(null);
+  useEffect(() => {
+    const id = draft?.createdAt ?? null;
+    if (id !== seededFor.current) {
+      seededFor.current = id;
+      setChoices(normalize(draft?.choices));
     }
+  }, [draft]);
+
+  const pending = useRef<DraftChoices | null>(null);
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  /** Writes unsaved choices to the server; saving also pushes the draft's expiry out. */
+  const flush = async () => {
+    clearTimeout(saveTimer.current);
+    const next = pending.current;
+    pending.current = null;
+    if (!next) return;
+    const saved = await api.imports.draft.saveChoices(next);
+    qc.setQueryData<ImportDraft | null>(keys.importDraft, (d) =>
+      d ? { ...d, choices: next, updatedAt: saved.updatedAt, expiresAt: saved.expiresAt } : d
+    );
   };
 
-  const removeRequest = (): ImportRemoveRequest => ({
-    employees: [...selection.employees],
-    projects: [...selection.projects],
-    repairs: [...selection.repairs],
-  });
-  const removeCount = selection.employees.size + selection.projects.size + selection.repairs.size;
+  const draftGone = () => {
+    qc.setQueryData(keys.importDraft, null);
+    setFailure(t('import.draft.expired'));
+  };
+
+  const onSaveError = (e: unknown) => {
+    if (e instanceof ApiError && e.status === 404) draftGone();
+    else setFailure(e instanceof Error ? e.message : t('common.saveFailed'));
+  };
+
+  // Leaving the tab must not drop the last tick: save what is pending on unmount
+  // (flush reads refs and the stable query client only, so the first render's
+  // closure is fine).
+  useEffect(
+    () => () => {
+      void flush().catch(() => {});
+    },
+    []
+  );
+
+  const change = (fn: (c: DraftChoices) => DraftChoices) => {
+    const next = fn(choicesRef.current);
+    choicesRef.current = next;
+    setChoices(next);
+    pending.current = next;
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => void flush().catch(onSaveError), 400);
+  };
+
+  /* ---- actions */
+
+  const choose = (file: File | undefined) => {
+    if (inputRef.current) inputRef.current.value = '';
+    if (!file) return;
+    setFailure(null);
+    setDone(null);
+    clearImportError();
+    void startImport(file, qc, t('import.failed'));
+  };
 
   const commit = async () => {
-    if (state.phase !== 'preview') return;
-    setConfirming(false);
-    setState({ phase: 'committing', upload: state.upload, preview: state.preview });
+    setConfirming(null);
+    setBusy(true);
+    setFailure(null);
     try {
-      const result = await api.imports.workbookCommit(state.upload, removeRequest());
-      setState({ phase: 'done', result });
-      if (inputRef.current) inputRef.current.value = '';
+      // The server applies the choices it holds — make sure it has the latest.
+      pending.current = choicesRef.current;
+      await flush();
+      const result = await api.imports.draft.commit();
+      qc.setQueryData(keys.importDraft, null);
+      setDone(result);
       toast.show(t('import.done', { n: result.applied }));
-      // An import can change anything the app shows — refresh the lot.
-      for (const key of ['employees', 'projects', 'departments', 'standard', 'repairs', 'reports', 'submittedDays', 'activity']) {
-        void qc.invalidateQueries({ queryKey: [key] });
-      }
+      for (const key of AFFECTED) void qc.invalidateQueries({ queryKey: [key] });
     } catch (e) {
-      setState({ phase: 'preview', upload: state.upload, preview: state.preview });
+      if (e instanceof ApiError && e.status === 404) draftGone();
+      else setFailure(e instanceof Error ? e.message : t('import.failed'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cancelDraft = async () => {
+    setConfirming(null);
+    clearTimeout(saveTimer.current);
+    pending.current = null;
+    setFailure(null);
+    try {
+      await api.imports.draft.cancel();
+      qc.setQueryData(keys.importDraft, null);
+      toast.show(t('import.draft.cancelled'));
+    } catch (e) {
       setFailure(e instanceof Error ? e.message : t('import.failed'));
     }
   };
 
-  const preview = state.phase === 'preview' || state.phase === 'committing' ? state.preview : null;
-  const adds = preview ? preview.counts.new : 0;
-  const updates = preview ? preview.counts.updated : 0;
-  const canCommit = adds + updates + removeCount > 0;
+  /* ---- removal ticks + duplicated rows */
 
   const toggle = (type: RemovableType, key: number, on: boolean) =>
-    setSelection((s) => {
-      const next = new Set(s[type]);
-      if (on) next.add(key);
-      else next.delete(key);
-      return { ...s, [type]: next };
+    change((c) => {
+      const s = new Set(c.remove[type] ?? []);
+      if (on) s.add(key);
+      else s.delete(key);
+      return { ...c, remove: { ...c.remove, [type]: [...s] } };
     });
-  const setAll = (type: RemovableType, keys: number[], on: boolean) =>
-    setSelection((s) => ({ ...s, [type]: on ? new Set(keys) : new Set<number>() }));
+  const setAll = (type: RemovableType, all: number[], on: boolean) =>
+    change((c) => ({ ...c, remove: { ...c.remove, [type]: on ? all : [] } }));
+
+  const duplicate = (srcRows: number[]) =>
+    change((c) => ({ ...c, added: [...c.added, ...srcRows.map((src) => ({ id: newId(), src, emp: null, label: '' }))] }));
+  const setDupEmployee = (id: string, emp: number | null, label: string) =>
+    change((c) => ({ ...c, added: c.added.map((a) => (a.id === id ? { ...a, emp, label } : a)) }));
+  const removeDup = (id: string) => change((c) => ({ ...c, added: c.added.filter((a) => a.id !== id) }));
+
+  /* ---- derived */
+
+  const reading = job.phase === 'reading' ? job : null;
+  const preview = draft?.preview ?? null;
+  const selected = useMemo(() => {
+    const out = {} as Record<RemovableType, Set<number>>;
+    for (const type of REMOVABLE) {
+      // Only keys still offered count — a stale tick on a record that is no
+      // longer a removal candidate means nothing (the server ignores it too).
+      const offered = new Set((preview?.sections.find((s) => s.type === type)?.removals ?? []).map((r) => r.key));
+      out[type] = new Set((choices.remove[type] ?? []).filter((k) => offered.has(k)));
+    }
+    return out;
+  }, [preview, choices.remove]);
+  const removeCount = REMOVABLE.reduce((n, type) => n + selected[type].size, 0);
+  const adds = preview?.counts.new ?? 0;
+  const updates = preview?.counts.updated ?? 0;
+  const dupCount = choices.added.length;
+  const missingEmp = choices.added.filter((a) => a.emp == null).length;
+  const canCommit = adds + updates + removeCount + dupCount > 0 && missingEmp === 0;
+  const dupSuffix = dupCount > 0 ? t('import.review.dup', { n: dupCount }) : '';
 
   return (
     <div className="card">
@@ -216,25 +293,47 @@ export function ImportScreen({ role }: { role: Role }) {
           ref={inputRef}
           type="file"
           accept={ACCEPT}
-          disabled={!canImport || state.phase === 'reading' || state.phase === 'committing'}
-          onChange={(e) => void choose(e.target.files?.[0])}
+          disabled={!canImport || !!reading || !!draft || busy}
+          onChange={(e) => choose(e.target.files?.[0])}
         />
 
         <div style={{ flexBasis: '100%' }}>
-          {state.phase === 'reading' && (
+          {reading && (
             <div className="mini">
-              {t(STAGE_TEXT[state.stage])} <Elapsed since={state.since} />
+              {t(STAGE_TEXT[reading.stage])} <Elapsed since={reading.since} />{' '}
+              <button className="btn sm ghost" onClick={cancelImport}>
+                {t('import.stage.cancel')}
+              </button>
             </div>
           )}
 
+          {job.phase === 'failed' && (
+            <div className="mini" style={{ color: '#c33' }}>
+              {job.message}
+            </div>
+          )}
           {failure && (
             <div className="mini" style={{ color: '#c33' }}>
               {failure}
             </div>
           )}
+          {draftQ.isLoading && canImport && <div className="mini">{t('common.loading')}</div>}
+          {draftQ.error && (
+            <div className="mini" style={{ color: '#c33' }}>
+              {draftQ.error instanceof Error ? draftQ.error.message : t('common.failedToLoad')}
+            </div>
+          )}
 
-          {preview && (
+          {draft && preview && (
             <div className="preview">
+              <div className="imp-draft">
+                <span>
+                  {t('import.draft.pending', { file: draft.fileName, at: hhmm(draft.createdAt), until: hhmm(draft.expiresAt) })}
+                </span>
+                <button className="btn sm ghost" onClick={() => setConfirming('cancel')} disabled={busy}>
+                  {t('import.draft.cancel')}
+                </button>
+              </div>
               <div className="mini" style={{ marginBottom: 10 }}>
                 <b>{t('import.review.intro')}</b>
               </div>
@@ -244,7 +343,7 @@ export function ImportScreen({ role }: { role: Role }) {
                   key={s.type}
                   section={s}
                   creates={s.type === 'reports' ? preview.creates : null}
-                  selected={isRemovable(s.type) ? selection[s.type] : null}
+                  selected={isRemovable(s.type) ? selected[s.type] : null}
                   onToggle={(key, on) => isRemovable(s.type) && toggle(s.type, key, on)}
                   onAll={(on) =>
                     isRemovable(s.type) && setAll(s.type, (s.removals ?? []).map((r) => r.key), on)
@@ -252,41 +351,60 @@ export function ImportScreen({ role }: { role: Role }) {
                 />
               ))}
 
+              <NewRowsReview
+                rows={preview.newRows ?? []}
+                total={preview.newRowsTotal ?? 0}
+                added={choices.added}
+                onDuplicate={duplicate}
+                onSetEmployee={setDupEmployee}
+                onRemove={removeDup}
+              />
+
               <div className="imp-summary">
                 {t('import.review.summary', { add: adds, upd: updates, rem: removeCount })}
+                {dupSuffix}
               </div>
-              <button
-                className="btn grn sm"
-                onClick={() => setConfirming(true)}
-                disabled={state.phase === 'committing' || !canCommit}
-              >
-                {state.phase === 'committing' ? t('common.working') : t('import.confirm')}
+              {missingEmp > 0 && (
+                <div className="mini" style={{ color: '#c33', marginBottom: 8 }}>
+                  {t('import.rows.needEmployee', { n: missingEmp })}
+                </div>
+              )}
+              <button className="btn grn sm" onClick={() => setConfirming('commit')} disabled={busy || !canCommit}>
+                {busy ? t('common.working') : t('import.confirm')}
               </button>{' '}
-              <button className="btn sm ghost" onClick={reset} disabled={state.phase === 'committing'}>
-                {t('common.cancel')}
+              <button className="btn sm ghost" onClick={() => setConfirming('cancel')} disabled={busy}>
+                {t('import.draft.cancel')}
               </button>
             </div>
           )}
 
-          {state.phase === 'done' && (
+          {done && (
             <div className="mini" style={{ color: '#137333' }}>
               {t('import.doneDetail', {
-                n: state.result.applied,
-                emp: state.result.removed.employees.length,
-                proj: state.result.removed.projects.length,
-                fix: state.result.removed.repairs.length,
+                n: done.applied,
+                emp: done.removed.employees.length,
+                proj: done.removed.projects.length,
+                fix: done.removed.repairs.length,
               })}
             </div>
           )}
         </div>
       </div>
 
-      {confirming && (
+      {confirming === 'commit' && (
         <ConfirmDialog
-          message={t('import.review.confirm', { add: adds, upd: updates, rem: removeCount })}
+          message={t('import.review.confirm', { add: adds, upd: updates, rem: removeCount }) + dupSuffix}
           confirmLabel={t('import.confirm')}
           onConfirm={() => void commit()}
-          onCancel={() => setConfirming(false)}
+          onCancel={() => setConfirming(null)}
+        />
+      )}
+      {confirming === 'cancel' && (
+        <ConfirmDialog
+          message={t('import.draft.cancelConfirm')}
+          confirmLabel={t('import.draft.cancel')}
+          onConfirm={() => void cancelDraft()}
+          onCancel={() => setConfirming(null)}
         />
       )}
       {toast.node}
@@ -304,6 +422,191 @@ function Elapsed({ since }: { since: number }) {
   }, []);
   const s = Math.max(0, Math.round((now - since) / 1000));
   return <span style={{ color: 'var(--muted)' }}>({t('import.elapsed', { s })})</span>;
+}
+
+/* ------------------------------------------- new hours rows (round 4 #3) */
+
+const empSuggest = (q: string): Promise<AcSuggestion<Employee>[]> =>
+  api.lookup.employees(q).then((rows) =>
+    rows.map((e) => ({ main: e.nick, sub: `${e.name} · ${e.num}`, value: e }))
+  );
+
+/**
+ * The upload's new hours rows, newest first. Selected rows can be duplicated:
+ * each copy appears right under its source row with the employee empty, to be
+ * filled in with the same autocomplete as the hours grid. A copy can be removed
+ * again; approval is blocked until every copy has an employee.
+ */
+function NewRowsReview({
+  rows,
+  total,
+  added,
+  onDuplicate,
+  onSetEmployee,
+  onRemove,
+}: {
+  rows: ImportNewRow[];
+  total: number;
+  added: DuplicatedRow[];
+  onDuplicate: (srcRows: number[]) => void;
+  onSetEmployee: (id: string, emp: number | null, label: string) => void;
+  onRemove: (id: string) => void;
+}) {
+  const t = useT();
+  const [filter, setFilter] = useState('');
+  const [selected, setSelected] = useState<Set<number>>(() => new Set());
+
+  const shown = useMemo(() => {
+    const q = filter.trim();
+    if (!q) return rows;
+    return rows.filter((r) =>
+      [r.date, r.emp_nick, r.emp_name, r.proj_name, r.proj_num, r.fix, r.dept, r.hours].some(
+        (v) => v != null && String(v).includes(q)
+      )
+    );
+  }, [rows, filter]);
+
+  const copiesOf = useMemo(() => {
+    const m = new Map<number, DuplicatedRow[]>();
+    for (const a of added) m.set(a.src, [...(m.get(a.src) ?? []), a]);
+    return m;
+  }, [added]);
+
+  const allShown = shown.length > 0 && shown.every((r) => selected.has(r.row));
+  const setShown = (on: boolean) =>
+    setSelected((s) => {
+      const next = new Set(s);
+      for (const r of shown) {
+        if (on) next.add(r.row);
+        else next.delete(r.row);
+      }
+      return next;
+    });
+  const toggle = (row: number, on: boolean) =>
+    setSelected((s) => {
+      const next = new Set(s);
+      if (on) next.add(row);
+      else next.delete(row);
+      return next;
+    });
+
+  const duplicateSelected = () => {
+    // In the order shown, so the copies line up with what the user ticked.
+    onDuplicate(rows.filter((r) => selected.has(r.row)).map((r) => r.row));
+    setSelected(new Set());
+    // Straight to the first copy's employee cell.
+    setTimeout(() => {
+      document.querySelector<HTMLInputElement>('tr.imp-dup.missing [data-grid-input]')?.focus();
+    }, 50);
+  };
+
+  const projLabel = (r: ImportNewRow) =>
+    r.fix != null ? t('report.repairLabel', { n: r.fix }) : r.proj_name ?? String(r.proj_num ?? '');
+
+  return (
+    <div className="imp-section">
+      <div className="t">{t('import.rows.title', { n: total })}</div>
+      {rows.length === 0 ? (
+        <div className="mini">{t('import.rows.none')}</div>
+      ) : (
+        <>
+          <div className="mini">
+            {t('import.rows.hint')}
+            {total > rows.length ? ` ${t('import.rows.truncated', { shown: rows.length, n: total })}` : ''}
+          </div>
+          <div className="toolbar" style={{ margin: '6px 0' }}>
+            <input
+              type="search"
+              placeholder={t('import.rows.filter')}
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            />
+            <button className="btn sm" disabled={selected.size === 0} onClick={duplicateSelected}>
+              {t('import.rows.duplicate', { n: selected.size })}
+            </button>
+          </div>
+          <div className="xl-scroll imp-rows-scroll">
+            <table className="xl imp-rows">
+              <thead>
+                <tr>
+                  <th style={{ width: 44 }}>
+                    <input
+                      type="checkbox"
+                      aria-label={t('import.rows.selectAll')}
+                      checked={allShown}
+                      onChange={(e) => setShown(e.target.checked)}
+                    />
+                  </th>
+                  <th>{t('report.th.date')}</th>
+                  <th style={{ minWidth: 130 }}>{t('report.th.employee')}</th>
+                  <th>{t('report.th.project')}</th>
+                  <th>{t('report.th.department')}</th>
+                  <th>{t('report.th.hours')}</th>
+                  <th style={{ width: 34 }} />
+                </tr>
+              </thead>
+              <tbody>
+                {shown.map((r) => (
+                  <Fragment key={r.row}>
+                    <tr className={selected.has(r.row) ? 'sel' : ''}>
+                      <td className="actcell">
+                        <input
+                          type="checkbox"
+                          aria-label={t('import.rows.select')}
+                          checked={selected.has(r.row)}
+                          onChange={(e) => toggle(r.row, e.target.checked)}
+                        />
+                      </td>
+                      <td className="derived" dir="ltr">
+                        {r.date}
+                      </td>
+                      <td className="derived" title={r.emp_name}>
+                        {r.emp_nick}
+                      </td>
+                      <td className="derived" title={projLabel(r)}>
+                        {projLabel(r)}
+                      </td>
+                      <td className="derived">{r.dept ?? ''}</td>
+                      <td className="derived">{r.hours}</td>
+                      <td className="actcell" />
+                    </tr>
+                    {(copiesOf.get(r.row) ?? []).map((d) => (
+                      <tr key={d.id} className={`imp-dup${d.emp == null ? ' missing' : ''}`}>
+                        <td className="actcell">
+                          <span className="badge-new">{t('import.rows.copy')}</span>
+                        </td>
+                        <td className="derived" dir="ltr">
+                          {r.date}
+                        </td>
+                        <AutocompleteCell<Employee>
+                          value={d.label}
+                          placeholder={t('import.rows.pickEmployee')}
+                          search={empSuggest}
+                          onType={(text) => onSetEmployee(d.id, null, text)}
+                          onPick={(e) => onSetEmployee(d.id, e.num, e.nick)}
+                          ariaLabel={t('aria.employee')}
+                        />
+                        <td className="derived" title={projLabel(r)}>
+                          {projLabel(r)}
+                        </td>
+                        <td className="derived">{r.dept ?? ''}</td>
+                        <td className="derived">{r.hours}</td>
+                        <td className="actcell">
+                          <button className="delx" title={t('import.rows.remove')} onClick={() => onRemove(d.id)}>
+                            ✕
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </Fragment>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
 }
 
 /* ------------------------------------------------------------ one list */

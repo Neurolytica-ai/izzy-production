@@ -507,7 +507,57 @@ export interface WorkbookCommitResult {
   counts: ImportCounts;
   creates: WorkbookCreates;
   removed: Record<RemovableType, number[]>;
+  /** Rows duplicated in the review (round 4 #3). */
+  duplicated?: number;
   sections: { type: WorkbookSection; applied: number; counts: ImportCounts }[];
+}
+
+/** A new hours row from the upload, listed in the review so it can be duplicated (round 4 #3). */
+export interface ImportNewRow {
+  /** Its row in the Excel sheet — the identity a duplicate refers to. */
+  row: number;
+  date: string;
+  emp_num: number;
+  emp_nick: string;
+  emp_name: string;
+  proj_num: number | null;
+  proj_name: string | null;
+  fix: number | null;
+  dept: string | null;
+  hours: number;
+}
+
+export interface DraftPreview extends WorkbookPreview {
+  /** The newest new hours rows (capped); newRowsTotal is how many there are in all. */
+  newRows: ImportNewRow[];
+  newRowsTotal: number;
+}
+
+/** A row duplicated in the review: a copy of file row `src`, with the employee the user fills in. */
+export interface DuplicatedRow {
+  id: string;
+  src: number;
+  emp: number | null;
+  /** What the employee cell shows (display only). */
+  label: string;
+}
+
+export interface DraftChoices {
+  remove: ImportRemoveRequest;
+  added: DuplicatedRow[];
+}
+
+/**
+ * An uploaded workbook waiting for approval, kept on the server (round 4 #2) —
+ * it survives switching tabs and refreshing, until approved, cancelled or expired.
+ */
+export interface ImportDraft {
+  fileName: string;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string;
+  preview: DraftPreview;
+  choices: Partial<DraftChoices>;
 }
 
 export type ExportView = 'report' | 'archive' | 'activity';
@@ -664,19 +714,22 @@ export const api = {
       requestUpload<{ data: ImportPreview }>(`/api/import/${type}/preview`, file).then((r) => r.data),
     commit: (type: ImportType, file: File) =>
       requestUpload<{ data: ImportCommitResult }>(`/api/import/${type}/commit`, file).then((r) => r.data),
-    workbookPreview: (upload: WorkbookUpload) =>
-      requestUpload<{ data: WorkbookPreview }>(
-        '/api/import/workbook/preview',
-        ...workbookUploadArgs(upload)
-      ).then((r) => r.data),
-    workbookCommit: (upload: WorkbookUpload, remove: ImportRemoveRequest = {}) => {
-      const [blob, fields, name] = workbookUploadArgs(upload);
-      return requestUpload<{ data: WorkbookCommitResult }>(
-        '/api/import/workbook/commit',
-        blob,
-        { ...fields, remove: JSON.stringify(remove) },
-        name
-      ).then((r) => r.data);
+    /** The pending workbook upload (round 4 #2): one per user, on the server. */
+    draft: {
+      get: () => get<ImportDraft | null>('/api/import/workbook/draft'),
+      create: (upload: WorkbookUpload, fileName: string) => {
+        const [blob, fields, name] = workbookUploadArgs(upload);
+        return requestUpload<{ data: ImportDraft }>(
+          '/api/import/workbook/draft',
+          blob,
+          { ...fields, fileName },
+          name
+        ).then((r) => r.data);
+      },
+      saveChoices: (choices: DraftChoices) =>
+        put<{ updatedAt: string; expiresAt: string }>('/api/import/workbook/draft/choices', { choices }),
+      cancel: () => del<void>('/api/import/workbook/draft'),
+      commit: () => post<WorkbookCommitResult>('/api/import/workbook/draft/commit'),
     },
   },
 

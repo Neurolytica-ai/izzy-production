@@ -32,6 +32,8 @@ input:focus,select:focus{outline:none;border-color:var(--blue2);box-shadow:0 0 0
 button.btn{background:var(--blue);color:#fff;border:none;padding:8px 14px;border-radius:7px;cursor:pointer;font-weight:600;font-size:13px;}
 button.btn:hover{background:var(--navy);} button.btn.ghost{background:#eef2f9;color:var(--blue);}
 button.btn.sm{padding:5px 9px;font-size:12px;} button.btn.grn{background:#1e7e34;} button.btn.grn:hover{background:#155724;}
+/* A disabled button must look disabled (e.g. approve, blocked until every duplicated row has an employee). */
+button.btn:disabled{opacity:.45;cursor:not-allowed;}
 .pill{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:700;}
 /* Repair tickets in lists: same layout as a project, just a color accent
    (client feedback 2026-08-03 #10 — "a different color, not a completely
@@ -83,6 +85,13 @@ td.actcell{text-align:center;width:36px;background:#fff;}
 .imp-change{margin-inline-end:8px;}
 .imp-warn{margin-inline-start:8px;font-size:11px;color:#a14a00;font-weight:600;}
 .imp-summary{margin:10px 0 8px;font-weight:700;}
+/* pending upload banner + new hours rows / duplicates (client feedback round 4 #2, #3) */
+.imp-draft{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;background:#fff8e1;border:1px solid #f0d77a;border-radius:8px;padding:8px 10px;margin-bottom:10px;font-size:12.5px;font-weight:600;}
+.imp-rows-scroll{max-height:420px;}
+table.xl.imp-rows{min-width:640px;}
+table.xl.imp-rows tr.sel td{background:#eef4ff;}
+tr.imp-dup td{background:#f1f8ff;}
+tr.imp-dup.missing td input{background:#fff4f4;}
 
 /* "+" duplicate button inside a grid cell (client feedback round 3 #5) */
 .dup-btn{width:18px;height:18px;line-height:16px;padding:0;border:1px solid #b9c4da;border-radius:50%;background:#fff;color:#1a56db;font-weight:700;font-size:13px;cursor:pointer;opacity:.55;}

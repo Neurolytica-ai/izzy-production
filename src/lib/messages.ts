@@ -243,6 +243,23 @@ export const MSG = {
     en: '{key} appears more than once in the file (first on row {first}) — this row was skipped',
     he: '{key} מופיע יותר מפעם אחת בקובץ (לראשונה בשורה {first}) — השורה דולגה',
   },
+  // Pending uploads + duplicated rows (client feedback round 4 #2/#3)
+  'import.draftNotFound': {
+    en: 'There is no pending upload — it was approved, cancelled, or it expired. Upload the file again.',
+    he: 'אין טעינה ממתינה — היא אושרה, בוטלה או שפג תוקפה. יש לטעון את הקובץ מחדש.',
+  },
+  'import.dupNeedsEmployee': {
+    en: '{n} duplicated rows have no employee yet',
+    he: '{n} שורות משוכפלות עדיין ללא עובד',
+  },
+  'import.dupBadEmployee': {
+    en: 'Employee {n} on a duplicated row does not exist',
+    he: 'עובד {n} בשורה משוכפלת אינו קיים',
+  },
+  'import.dupBadSource': {
+    en: 'Row {n} of the file is not an hours row that can be duplicated',
+    he: 'שורה {n} בקובץ אינה שורת שעות שניתן לשכפל',
+  },
 
   // ---- field validation --------------------------------------------------
   'field.required': {

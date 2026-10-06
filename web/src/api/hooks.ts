@@ -44,7 +44,17 @@ export const keys = {
   activity: (params: ActivityListParams) => ['activity', params] as const,
   coverage: (date: string) => ['coverage', date] as const,
   dashboard: (params: DashboardParams) => ['dashboard', params] as const,
+  importDraft: ['importDraft'] as const,
 };
+
+/** The current user's workbook upload waiting for approval, or null (round 4 #2). */
+export function useImportDraft(enabled = true) {
+  return useQuery({
+    queryKey: keys.importDraft,
+    queryFn: api.imports.draft.get,
+    enabled,
+  });
+}
 
 /** Master data changes rarely; no need to refetch it on every mount. */
 const MASTER_STALE_MS = 60_000;
