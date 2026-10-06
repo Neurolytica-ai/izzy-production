@@ -18,6 +18,7 @@
 import { Router, type Request, type RequestHandler } from 'express';
 import multer from 'multer';
 import type { PoolClient } from 'pg';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { gunzip, gzip } from 'node:zlib';
 import { z } from 'zod';
@@ -251,6 +252,8 @@ interface Diff {
   counts: { new: number; updated: number; unchanged: number; invalid: number };
   rows: { status: 'new' | 'update' | 'unchanged'; label: string; changes?: Change[] }[];
   errors: RowError[];
+  /** For the timing log: how the report history was compared. */
+  note?: string;
 }
 
 /** One changed column of an updated row — the preview shows "field: from → to". */
@@ -288,6 +291,48 @@ async function parseChecked(type: ImportType, wb: Workbook): Promise<ParseResult
 
 const isEmpty = (p: ParseResult) => p.items.length === 0 && p.errors.length === 0;
 
+/** A report row's identity for the duplicate check — every stored column but the id. */
+const sig = (r: Item) =>
+  [r.date, r.emp_num, r.proj_num ?? '', r.fix ?? '', r.dept ?? '', Number(r.hours)].join('|');
+
+/** 60 bits of the row's md5, so a date's rows can be summed in any order (SQL below does the same). */
+const rowHash = (s: string) => BigInt(`0x${createHash('md5').update(s).digest('hex').slice(0, 15)}`);
+
+/**
+ * The dates whose report rows are exactly the same multiset in the file and in
+ * the database. Each side reduces a date to (row count, sum of row hashes) — the
+ * database returns one small row per date instead of every report. The SQL row
+ * text must equal `sig`: dates as yyyy-mm-dd, NULLs as '', hours without
+ * trailing zeros (trim_scale: 8.00 → "8", like JS's String(8)). Any formatting
+ * drift only makes dates mismatch — they are then compared row by row — so
+ * this can cost speed, never correctness.
+ */
+async function matchingDates(items: Item[], dates: string[]): Promise<Set<string>> {
+  const matched = new Set<string>();
+  if (dates.length === 0) return matched;
+  const file = new Map<string, { n: number; h: bigint }>();
+  for (const it of items) {
+    const d = it.date as string;
+    const f = file.get(d) ?? { n: 0, h: 0n };
+    f.n++;
+    f.h += rowHash(sig(it));
+    file.set(d, f);
+  }
+  const db = await query<{ d: string; n: number; h: string }>(
+    `SELECT to_char(date, 'YYYY-MM-DD') AS d, count(*)::int AS n,
+            sum(('x' || substr(md5(concat_ws('|', to_char(date, 'YYYY-MM-DD'), emp_num,
+                  coalesce(proj_num::text, ''), coalesce(fix::text, ''), coalesce(dept, ''),
+                  trim_scale(hours))), 1, 15))::bit(60)::bigint)::text AS h
+       FROM reports WHERE date = ANY($1::date[]) GROUP BY date`,
+    [dates]
+  );
+  for (const r of db) {
+    const f = file.get(r.d);
+    if (f && f.n === r.n && f.h.toString() === r.h) matched.add(r.d);
+  }
+  return matched;
+}
+
 async function diffParsed(type: ImportType, parsed: ParseResult): Promise<Diff> {
   const errors = [...parsed.errors];
   let items = parsed.items;
@@ -296,11 +341,22 @@ async function diffParsed(type: ImportType, parsed: ParseResult): Promise<Diff> 
     // No natural key: idempotency comes from consuming exact duplicates. Each
     // identical row already in the database absorbs one identical file row;
     // anything beyond that count is genuinely new.
-    const dates = [...new Set(items.map((it) => it.date))];
+    //
+    // The history is ~200k rows, and fetching them all to compare took ~60 s on
+    // production — the VPS (Vilnius) is ~190 ms from Supabase (Singapore) — so
+    // dates are compared by FINGERPRINT first (see reportFingerprints): a date
+    // whose rows are identical in file and database is wholly unchanged, and
+    // only the remaining dates are fetched and consumed row by row below. Same
+    // result as comparing everything: a fingerprint mismatch only ever costs a
+    // fetch, never a wrong answer.
+    const fileDates = [...new Set(items.map((it) => it.date as string))];
+    const matched = await matchingDates(items, fileDates);
+    const sameItems = items.filter((it) => matched.has(it.date as string));
+    items = items.filter((it) => !matched.has(it.date as string));
+    const dates = fileDates.filter((d) => !matched.has(d));
     const existing = dates.length
       ? await query('SELECT date, emp_num, proj_num, fix, dept, hours FROM reports WHERE date = ANY($1)', [dates])
       : [];
-    const sig = (r: Item) => [r.date, r.emp_num, r.proj_num ?? '', r.fix ?? '', r.dept, Number(r.hours)].join('|');
     const pool = new Map<string, number>();
     for (const r of existing) pool.set(sig(r), (pool.get(sig(r)) ?? 0) + 1);
 
@@ -320,11 +376,14 @@ async function diffParsed(type: ImportType, parsed: ParseResult): Promise<Diff> 
         rows.push({ status: 'new', label });
       }
     }
+    // Rows of fingerprint-matched dates are all unchanged. They get no per-row
+    // label: the preview never lists history rows (previewOf), only counts.
     return {
       toApply,
-      counts: { new: toApply.length, updated: 0, unchanged, invalid: errors.length },
+      counts: { new: toApply.length, updated: 0, unchanged: unchanged + sameItems.length, invalid: errors.length },
       rows,
       errors,
+      note: `${matched.size}/${fileDates.length} dates matched, ${existing.length} rows fetched`,
     };
   }
 
@@ -740,18 +799,21 @@ async function diffWorkbook(extract: WorkbookExtract, timer: StageTimer): Promis
   timer.lap(`parse(${history.items.length})`);
 
   if (parsed.every(isEmpty) && isEmpty(history)) throw badRequest('import.noRows');
-  const sections: WorkbookDiff['sections'] = [];
-  for (let i = 0; i < MASTER_TYPES.length; i++) {
-    const type = MASTER_TYPES[i]!;
-    sections.push({
-      type,
-      diff: await diffParsed(type, parsed[i]!),
-      ...(isRemovable(type) ? { removals: await removalCandidates(type, parsed[i]!.items) } : {}),
-    });
-  }
+  // The lists' queries are independent: run them side by side — each one is a
+  // ~190 ms round trip to the database on production.
+  const sections: WorkbookDiff['sections'] = await Promise.all(
+    MASTER_TYPES.map(async (type, i) => {
+      const [diff, removals] = await Promise.all([
+        diffParsed(type, parsed[i]!),
+        isRemovable(type) ? removalCandidates(type, parsed[i]!.items) : Promise.resolve(undefined),
+      ]);
+      return { type, diff, ...(removals ? { removals } : {}) };
+    })
+  );
   timer.lap('diff-masters');
-  sections.push({ type: 'reports', diff: await diffParsed('reports', history) });
-  timer.lap('diff-reports');
+  const reports = await diffParsed('reports', history);
+  sections.push({ type: 'reports', diff: reports });
+  timer.lap(`diff-reports(${reports.note ?? ''})`);
   return { sections, creates: history.creates, history: history.items, fileMasters };
 }
 
