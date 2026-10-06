@@ -358,6 +358,15 @@ export const STRINGS = {
     he: 'מעלה וקורא את הקובץ… הפעולה עשויה לקחת דקה-שתיים',
   },
   'import.reading': { en: 'Reading file…', he: 'קורא קובץ…' },
+  'import.stage.extract': {
+    en: 'Reading the file on this computer…',
+    he: 'קורא את הקובץ במחשב זה…',
+  },
+  'import.stage.server': {
+    en: 'Checking the data against the system…',
+    he: 'בודק את הנתונים מול המערכת…',
+  },
+  'import.elapsed': { en: '{s}s', he: '{s} שניות' },
   'import.review.intro': {
     en: 'Review the changes below. Nothing is saved until you confirm.',
     he: 'יש לעבור על השינויים שלהלן. דבר לא נשמר עד לאישור.',

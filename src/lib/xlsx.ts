@@ -10,6 +10,7 @@
  * prototype it is called out inline.
  */
 import * as XLSX from 'xlsx';
+import { MASTER_ROW_CAP, findSheet } from './workbook-shape.ts';
 
 /** One worksheet as a row-major grid, nulls preserved — the prototype's sheetGrid(). */
 export type Grid = (string | number | boolean | Date | null)[][];
@@ -22,7 +23,7 @@ export type Workbook = XLSX.WorkBook;
  * sheets with ~1M formatted-but-empty rows (~100 MB of XML each); without a cap
  * a single parse takes ~17 s. The real lists are a few hundred rows.
  */
-export const NAMED_SHEET_ROW_CAP = 50_000;
+export const NAMED_SHEET_ROW_CAP = MASTER_ROW_CAP;
 
 /**
  * Parses an upload. With `sheets`, only those sheets are parsed (and capped at
@@ -54,9 +55,8 @@ export function firstSheetGrid(wb: Workbook): Grid {
  * against any of `names` (the office has spelled `repairs` as `repaires`).
  * Returns null when the workbook has no such sheet.
  */
-export function namedSheetGrid(wb: Workbook, names: string[]): Grid | null {
-  const want = names.map((n) => n.trim().toLowerCase());
-  const hit = wb.SheetNames.find((s) => want.includes(s.trim().toLowerCase()));
+export function namedSheetGrid(wb: Workbook, names: readonly string[]): Grid | null {
+  const hit = findSheet(wb.SheetNames, names);
   return hit ? gridOf(wb.Sheets[hit]!) : null;
 }
 

@@ -15,14 +15,15 @@
  *
  * Role: manager/admin (WP §8 — imports are a manager capability).
  */
-import { Router, type RequestHandler } from 'express';
+import { Router, type Request, type RequestHandler, type Response } from 'express';
 import multer from 'multer';
 import type { PoolClient } from 'pg';
+import { promisify } from 'node:util';
+import { gunzip } from 'node:zlib';
 import { query, withTransaction } from '../lib/db.ts';
 import { ACTION, logWith } from '../lib/activity.ts';
 import { badRequest, badRequestText } from '../lib/errors.ts';
 import {
-  HISTORY_ROW_CAP,
   IMPORT_TYPES,
   MASTER_TYPES,
   WORKBOOK_HISTORY,
@@ -31,6 +32,7 @@ import {
   isMasterType,
   parseHistory,
   parseImport,
+  parseMasterGrid,
   type HistoryResult,
   type ImportType,
   type MasterType,
@@ -39,7 +41,11 @@ import {
 } from '../lib/importers.ts';
 import { tf } from '../lib/messages.ts';
 import { MASTER_WRITE, currentUser, requireRole } from '../middleware/auth.ts';
-import { namedSheetGrid, readWorkbook, type Workbook } from '../lib/xlsx.ts';
+import { readWorkbook, type Workbook } from '../lib/xlsx.ts';
+import { extractWorkbook, isWorkbookExtract } from '../lib/workbook-extract.ts';
+import type { WorkbookExtract } from '../lib/workbook-shape.ts';
+
+const gunzipAsync = promisify(gunzip);
 
 export const importsRouter = Router();
 
@@ -267,12 +273,15 @@ function read(buf: Buffer, sheets?: string[], rowCap?: number): Workbook {
   }
 }
 
-/** Parse one type; a missing sheet/header is fatal, an empty sheet is left to the caller. */
-async function parseChecked(type: ImportType, wb: Workbook): Promise<ParseResult> {
-  const parsed = await parseImport(type, wb);
+/** A missing sheet/header is fatal; an empty sheet is left to the caller. */
+function checked(parsed: ParseResult): ParseResult {
   if (parsed.sheetMissing) throw badRequestText(tf('import.sheetMissing', { sheet: parsed.sheetMissing }));
   if (parsed.headerMissing) throw badRequest('import.headerNotFound');
   return parsed;
+}
+
+async function parseChecked(type: ImportType, wb: Workbook): Promise<ParseResult> {
+  return checked(await parseImport(type, wb));
 }
 
 const isEmpty = (p: ParseResult) => p.items.length === 0 && p.errors.length === 0;
@@ -643,20 +652,87 @@ interface WorkbookDiff {
   creates: HistoryResult['creates'];
 }
 
-async function diffWorkbook(buf: Buffer): Promise<WorkbookDiff> {
-  const wb = read(buf, WORKBOOK_SHEETS);
-  const parsed = await Promise.all(MASTER_TYPES.map((type) => parseChecked(type, wb)));
+/**
+ * Per-stage wall time of one workbook request, logged as a single line —
+ * client feedback round 4 #1 asks where the ~2 minutes go, and the answer
+ * differs between a laptop next to the database and the VPS (Vilnius) talking
+ * to Supabase (Singapore, ~190 ms per round trip).
+ */
+function stageTimer(label: string, t0: number) {
+  let last = t0;
+  const laps: string[] = [];
+  return {
+    lap(name: string) {
+      const now = performance.now();
+      laps.push(`${name} ${((now - last) / 1000).toFixed(1)}s`);
+      last = now;
+    },
+    done(outcome: string) {
+      const total = ((performance.now() - t0) / 1000).toFixed(1);
+      console.log(`[import] ${label} ${outcome} ${total}s · ${laps.join(' · ')}`);
+    },
+  };
+}
+type StageTimer = ReturnType<typeof stageTimer>;
 
-  // The history sheet is read on its own (see readWorkbook) — ~200k rows.
-  const histGrid = namedSheetGrid(read(buf, [...WORKBOOK_HISTORY.sheets], HISTORY_ROW_CAP), [
-    ...WORKBOOK_HISTORY.sheets,
-  ]);
+/** Stamps the request's arrival, so the timer also covers receiving the upload. */
+const startClock: RequestHandler = (_req, res, next) => {
+  res.locals.t0 = performance.now();
+  next();
+};
+
+/**
+ * The uncompressed extract can be well over the upload size (~15 MB for today's
+ * ~200k history rows from a ~2 MB upload); this bounds what a crafted gzip may
+ * inflate to.
+ */
+const EXTRACT_MAX_BYTES = 256 * 1024 * 1024;
+
+/**
+ * The workbook's data, from either upload form (round 4 #1):
+ *   kind=extract — the browser already read the workbook (lib/workbook-extract
+ *                  in a Web Worker) and sent the grids gzipped, ~2 MB;
+ *   otherwise    — the raw workbook, ~34 MB, extracted here with the same code.
+ * Both lead to the same grids, so everything after this is one path.
+ */
+async function workbookExtract(req: Request, timer: StageTimer): Promise<{ extract: WorkbookExtract; via: string }> {
+  if (!req.file) throw badRequest('import.noFile');
+  const buf = req.file.buffer;
+  const size = `${(buf.length / 1e6).toFixed(1)}MB`;
+  if (req.body?.kind === 'extract') {
+    let json: unknown;
+    try {
+      json = JSON.parse((await gunzipAsync(buf, { maxOutputLength: EXTRACT_MAX_BYTES })).toString('utf8'));
+    } catch {
+      throw badRequest('import.badFile');
+    }
+    if (!isWorkbookExtract(json)) throw badRequest('import.badFile');
+    timer.lap(`unpack(${size})`);
+    return { extract: json, via: 'browser' };
+  }
+  let extract: WorkbookExtract;
+  try {
+    extract = extractWorkbook(buf);
+  } catch {
+    throw badRequest('import.badFile');
+  }
+  timer.lap(`read-xlsx(${size})`);
+  return { extract, via: 'file' };
+}
+
+async function diffWorkbook(extract: WorkbookExtract, timer: StageTimer): Promise<WorkbookDiff> {
+  const parsed = MASTER_TYPES.map((type) => checked(parseMasterGrid(type, extract.parts[type])));
+
+  const histGrid = extract.parts.history;
   if (!histGrid) throw badRequestText(tf('import.sheetMissing', { sheet: WORKBOOK_HISTORY.sheets[0] }));
   const fileMasters = Object.fromEntries(
     MASTER_TYPES.map((type, i) => [type, parsed[i]!.items])
   ) as Record<MasterType, Item[]>;
-  const history = parseHistory(histGrid, await historyLookups(fileMasters));
+  const lookups = await historyLookups(fileMasters);
+  timer.lap('lookups');
+  const history = parseHistory(histGrid, lookups);
   if (history.headerMissing) throw badRequest('import.headerNotFound');
+  timer.lap(`parse(${history.items.length})`);
 
   if (parsed.every(isEmpty) && isEmpty(history)) throw badRequest('import.noRows');
   const sections: WorkbookDiff['sections'] = [];
@@ -668,7 +744,9 @@ async function diffWorkbook(buf: Buffer): Promise<WorkbookDiff> {
       ...(isRemovable(type) ? { removals: await removalCandidates(type, parsed[i]!.items) } : {}),
     });
   }
+  timer.lap('diff-masters');
   sections.push({ type: 'reports', diff: await diffParsed('reports', history) });
+  timer.lap('diff-reports');
   return { sections, creates: history.creates };
 }
 
@@ -689,23 +767,43 @@ const createCounts = (c: HistoryResult['creates']) => ({
   repairs: c.repairs.length,
 });
 
-importsRouter.post('/workbook/preview', uploadFile, async (req, res) => {
-  if (!req.file) throw badRequest('import.noFile');
-  const { sections, creates } = await diffWorkbook(req.file.buffer);
-  res.json({
-    data: {
-      counts: sumCounts(sections),
-      creates: createCounts(creates),
-      sections: sections.map(({ type, diff, removals }) => previewOf(type, diff, removals)),
-    },
-  });
+importsRouter.post('/workbook/preview', startClock, uploadFile, async (req, res) => {
+  const timer = stageTimer('workbook/preview', res.locals.t0 as number);
+  timer.lap('receive');
+  let outcome = 'failed';
+  try {
+    const { extract, via } = await workbookExtract(req, timer);
+    const { sections, creates } = await diffWorkbook(extract, timer);
+    res.json({
+      data: {
+        counts: sumCounts(sections),
+        creates: createCounts(creates),
+        sections: sections.map(({ type, diff, removals }) => previewOf(type, diff, removals)),
+      },
+    });
+    timer.lap('respond');
+    outcome = `ok via ${via}`;
+  } finally {
+    timer.done(outcome);
+  }
 });
 
-importsRouter.post('/workbook/commit', uploadFile, async (req, res) => {
-  if (!req.file) throw badRequest('import.noFile');
+importsRouter.post('/workbook/commit', startClock, uploadFile, async (req, res) => {
+  const timer = stageTimer('workbook/commit', res.locals.t0 as number);
+  timer.lap('receive');
+  let outcome = 'failed';
+  try {
+    outcome = await commitWorkbook(req, res, timer);
+  } finally {
+    timer.done(outcome);
+  }
+});
+
+async function commitWorkbook(req: Request, res: Response, timer: StageTimer): Promise<string> {
   const user = currentUser(req);
   const requested = parseRemoveField(req.body?.remove);
-  const { sections, creates } = await diffWorkbook(req.file.buffer);
+  const { extract, via } = await workbookExtract(req, timer);
+  const { sections, creates } = await diffWorkbook(extract, timer);
   const counts = sumCounts(sections);
   const made = createCounts(creates);
 
@@ -742,6 +840,7 @@ importsRouter.post('/workbook/commit', uploadFile, async (req, res) => {
       }
     });
   }
+  timer.lap('write');
 
   res.json({
     data: {
@@ -756,7 +855,8 @@ importsRouter.post('/workbook/commit', uploadFile, async (req, res) => {
       })),
     },
   });
-});
+  return `ok via ${via} applied ${counts.new + counts.updated + removedTotal}`;
+}
 
 /* ------------------------------------------------------- per-type routes */
 

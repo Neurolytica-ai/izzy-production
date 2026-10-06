@@ -102,10 +102,15 @@ async function requestRaw<T>(method: string, path: string, body?: unknown): Prom
 }
 
 /** Multipart upload — the browser sets the content-type (with its boundary) itself. */
-async function requestUpload<T>(path: string, file: File, fields: Record<string, string> = {}): Promise<T> {
+async function requestUpload<T>(
+  path: string,
+  file: Blob,
+  fields: Record<string, string> = {},
+  filename = file instanceof File ? file.name : 'upload'
+): Promise<T> {
   const fd = new FormData();
   for (const [k, v] of Object.entries(fields)) fd.append(k, v);
-  fd.append('file', file);
+  fd.append('file', file, filename);
   let res: Response;
   try {
     res = await fetch(path, { method: 'POST', credentials: 'same-origin', body: fd });
@@ -459,6 +464,20 @@ export interface ImportPreview {
 export type RemovableType = 'employees' | 'projects' | 'repairs';
 export type ImportRemoveRequest = Partial<Record<RemovableType, number[]>>;
 
+/**
+ * What the workbook endpoints receive (client feedback round 4 #1): the
+ * extract the browser read out of the workbook (~2 MB gzipped — see
+ * lib/extractInBrowser), or the workbook file itself (~34 MB) when the browser
+ * could not read it. The server parses both identically.
+ */
+export type WorkbookUpload = { kind: 'extract'; blob: Blob } | { kind: 'file'; file: File };
+
+function workbookUploadArgs(u: WorkbookUpload): [Blob, Record<string, string>, string] {
+  return u.kind === 'extract'
+    ? [u.blob, { kind: 'extract' }, 'workbook.extract.json.gz']
+    : [u.file, {}, u.file.name];
+}
+
 export interface ImportCommitResult {
   type: ImportType;
   applied: number;
@@ -645,12 +664,20 @@ export const api = {
       requestUpload<{ data: ImportPreview }>(`/api/import/${type}/preview`, file).then((r) => r.data),
     commit: (type: ImportType, file: File) =>
       requestUpload<{ data: ImportCommitResult }>(`/api/import/${type}/commit`, file).then((r) => r.data),
-    workbookPreview: (file: File) =>
-      requestUpload<{ data: WorkbookPreview }>('/api/import/workbook/preview', file).then((r) => r.data),
-    workbookCommit: (file: File, remove: ImportRemoveRequest = {}) =>
-      requestUpload<{ data: WorkbookCommitResult }>('/api/import/workbook/commit', file, {
-        remove: JSON.stringify(remove),
-      }).then((r) => r.data),
+    workbookPreview: (upload: WorkbookUpload) =>
+      requestUpload<{ data: WorkbookPreview }>(
+        '/api/import/workbook/preview',
+        ...workbookUploadArgs(upload)
+      ).then((r) => r.data),
+    workbookCommit: (upload: WorkbookUpload, remove: ImportRemoveRequest = {}) => {
+      const [blob, fields, name] = workbookUploadArgs(upload);
+      return requestUpload<{ data: WorkbookCommitResult }>(
+        '/api/import/workbook/commit',
+        blob,
+        { ...fields, remove: JSON.stringify(remove) },
+        name
+      ).then((r) => r.data);
+    },
   },
 
   activity: {

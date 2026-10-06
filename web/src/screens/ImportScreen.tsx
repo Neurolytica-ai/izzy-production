@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   api,
@@ -10,11 +10,13 @@ import {
   type WorkbookCommitResult,
   type WorkbookPreview,
   type WorkbookSection,
+  type WorkbookUpload,
 } from '../api/client.ts';
 import { ConfirmDialog } from '../components/Modal.tsx';
 import { useToast } from '../components/Toast.tsx';
 import { useT } from '../i18n/index.tsx';
 import type { StringKey } from '../i18n/strings.ts';
+import { extractInBrowser } from '../lib/extractInBrowser.ts';
 
 /**
  * WP §6.5 / §9 — Excel import, preview-then-commit. Choosing a file uploads it
@@ -33,6 +35,11 @@ import type { StringKey } from '../i18n/strings.ts';
  * REMOVAL, each with a checkbox. Nothing is removed unless it is ticked and the
  * summary confirmation is accepted. "Removed" = deactivated / archived / closed
  * on the server, never deleted — past reports keep pointing at them.
+ *
+ * Client feedback round 4 #1 (≤60s): the browser reads the 34 MB workbook
+ * itself (a Web Worker) and uploads only what the import uses, ~2 MB — the
+ * upload was most of the wait. If the browser cannot read it, the file itself is
+ * uploaded as before. Preview and commit send the same upload.
  */
 
 const SECTION_TITLE: Record<WorkbookSection, StringKey> = {
@@ -79,11 +86,20 @@ function initialSelection(): Selection {
   return { employees: new Set(), projects: new Set(), repairs: new Set() };
 }
 
+/** extract = reading in this browser; server = server checking the extract; upload = fallback, sending the whole file. */
+type ReadingStage = 'extract' | 'server' | 'upload';
+
+const STAGE_TEXT: Record<ReadingStage, StringKey> = {
+  extract: 'import.stage.extract',
+  server: 'import.stage.server',
+  upload: 'import.readingWorkbook',
+};
+
 type State =
   | { phase: 'idle' }
-  | { phase: 'reading' }
-  | { phase: 'preview'; file: File; preview: WorkbookPreview }
-  | { phase: 'committing'; file: File; preview: WorkbookPreview }
+  | { phase: 'reading'; stage: ReadingStage; since: number }
+  | { phase: 'preview'; upload: WorkbookUpload; preview: WorkbookPreview }
+  | { phase: 'committing'; upload: WorkbookUpload; preview: WorkbookPreview }
   | { phase: 'done'; result: WorkbookCommitResult };
 
 export function ImportScreen({ role }: { role: Role }) {
@@ -97,7 +113,13 @@ export function ImportScreen({ role }: { role: Role }) {
   const [selection, setSelection] = useState<Selection>(initialSelection);
   const [confirming, setConfirming] = useState(false);
 
+  // The in-browser read of the current file; aborted (worker terminated) on a
+  // new choice, on cancel, and when the screen unmounts.
+  const reading = useRef<AbortController | null>(null);
+  useEffect(() => () => reading.current?.abort(), []);
+
   const reset = () => {
+    reading.current?.abort();
     setState({ phase: 'idle' });
     setFailure(null);
     if (inputRef.current) inputRef.current.value = '';
@@ -105,13 +127,31 @@ export function ImportScreen({ role }: { role: Role }) {
 
   const choose = async (file: File | undefined) => {
     if (!file) return;
+    reading.current?.abort();
+    const ctl = new AbortController();
+    reading.current = ctl;
     setFailure(null);
-    setState({ phase: 'reading' });
+    const since = Date.now();
+    setState({ phase: 'reading', stage: 'extract', since });
     try {
-      const preview = await api.imports.workbookPreview(file);
+      let upload: WorkbookUpload;
+      try {
+        upload = { kind: 'extract', blob: await extractInBrowser(file, ctl.signal) };
+        setState({ phase: 'reading', stage: 'server', since });
+      } catch (e) {
+        if (ctl.signal.aborted) return;
+        // An old browser, or a PC short on memory: send the file itself —
+        // slower, same result (the server extracts it with the same code).
+        console.warn('[import] reading the workbook in the browser failed; uploading the file', e);
+        upload = { kind: 'file', file };
+        setState({ phase: 'reading', stage: 'upload', since });
+      }
+      const preview = await api.imports.workbookPreview(upload);
+      if (ctl.signal.aborted) return;
       setSelection(initialSelection());
-      setState({ phase: 'preview', file, preview });
+      setState({ phase: 'preview', upload, preview });
     } catch (e) {
+      if (ctl.signal.aborted) return;
       reset();
       setFailure(e instanceof Error ? e.message : t('import.failed'));
     }
@@ -127,9 +167,9 @@ export function ImportScreen({ role }: { role: Role }) {
   const commit = async () => {
     if (state.phase !== 'preview') return;
     setConfirming(false);
-    setState({ phase: 'committing', file: state.file, preview: state.preview });
+    setState({ phase: 'committing', upload: state.upload, preview: state.preview });
     try {
-      const result = await api.imports.workbookCommit(state.file, removeRequest());
+      const result = await api.imports.workbookCommit(state.upload, removeRequest());
       setState({ phase: 'done', result });
       if (inputRef.current) inputRef.current.value = '';
       toast.show(t('import.done', { n: result.applied }));
@@ -138,7 +178,7 @@ export function ImportScreen({ role }: { role: Role }) {
         void qc.invalidateQueries({ queryKey: [key] });
       }
     } catch (e) {
-      setState({ phase: 'preview', file: state.file, preview: state.preview });
+      setState({ phase: 'preview', upload: state.upload, preview: state.preview });
       setFailure(e instanceof Error ? e.message : t('import.failed'));
     }
   };
@@ -181,7 +221,11 @@ export function ImportScreen({ role }: { role: Role }) {
         />
 
         <div style={{ flexBasis: '100%' }}>
-          {state.phase === 'reading' && <div className="mini">{t('import.readingWorkbook')}</div>}
+          {state.phase === 'reading' && (
+            <div className="mini">
+              {t(STAGE_TEXT[state.stage])} <Elapsed since={state.since} />
+            </div>
+          )}
 
           {failure && (
             <div className="mini" style={{ color: '#c33' }}>
@@ -248,6 +292,18 @@ export function ImportScreen({ role }: { role: Role }) {
       {toast.node}
     </div>
   );
+}
+
+/** Seconds since `since`, ticking — so a long read visibly is still working. */
+function Elapsed({ since }: { since: number }) {
+  const t = useT();
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const s = Math.max(0, Math.round((now - since) / 1000));
+  return <span style={{ color: 'var(--muted)' }}>({t('import.elapsed', { s })})</span>;
 }
 
 /* ------------------------------------------------------------ one list */

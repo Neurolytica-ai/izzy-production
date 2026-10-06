@@ -37,6 +37,7 @@
  */
 import { query } from './db.ts';
 import { tf } from './messages.ts';
+import { EXTRACT_COLS, HISTORY_ROW_CAP as SHAPE_HISTORY_ROW_CAP, WORKBOOK_PARTS } from './workbook-shape.ts';
 import {
   cellDate,
   clientOf,
@@ -97,12 +98,15 @@ const squash = (s: string) => s.replace(/\s+/g, ' ').trim();
 
 /* ---------------------------------------------- master lists (hours workbook) */
 
-/** Where each master list lives in the hours workbook. Sheet aliases match case-insensitively. */
+/**
+ * Where each master list lives in the hours workbook. Sheet aliases (shared
+ * with the browser's extraction, lib/workbook-shape) match case-insensitively.
+ */
 export const WORKBOOK_LAYOUT = {
-  employees: { sheets: ['Employees'], nick: col('A'), num: col('B'), name: col('C'), status: col('D') },
-  repairs: { sheets: ['repairs', 'repaires'], fix: col('A'), client: col('B') },
-  departments: { sheets: ['Departments'], name: col('A'), num: col('B') },
-  projects: { sheets: ['ProjectNum'], nick: col('G'), name: col('H'), num: col('I') },
+  employees: { sheets: WORKBOOK_PARTS.employees, nick: col('A'), num: col('B'), name: col('C'), status: col('D') },
+  repairs: { sheets: WORKBOOK_PARTS.repairs, fix: col('A'), client: col('B') },
+  departments: { sheets: WORKBOOK_PARTS.departments, name: col('A'), num: col('B') },
+  projects: { sheets: WORKBOOK_PARTS.projects, nick: col('G'), name: col('H'), num: col('I') },
 } as const;
 
 export type MasterType = keyof typeof WORKBOOK_LAYOUT;
@@ -256,6 +260,12 @@ const MASTER_PARSERS: Record<MasterType, (g: Grid) => ParseResult> = {
   departments: parseDepartments,
   repairs: parseRepairs,
 };
+
+/** One master list from its sheet's grid — null when the workbook has no such sheet. */
+export function parseMasterGrid(type: MasterType, grid: Grid | null): ParseResult {
+  if (!grid) return { items: [], errors: [], sheetMissing: WORKBOOK_LAYOUT[type].sheets[0] };
+  return MASTER_PARSERS[type](grid);
+}
 
 /* -------------------------------------------------------------- standard */
 
@@ -487,7 +497,7 @@ async function parseReports(grid: Grid): Promise<ParseResult> {
  * it is ~200k rows, hence its own row cap.
  */
 export const WORKBOOK_HISTORY = {
-  sheets: ['דיווחי שעות'],
+  sheets: WORKBOOK_PARTS.history,
   date: col('A'),
   emp: col('B'),
   projText: col('C'),
@@ -500,7 +510,22 @@ export const WORKBOOK_HISTORY = {
   deptNum: col('J'),
 } as const;
 
-export const HISTORY_ROW_CAP = 1_000_000;
+export const HISTORY_ROW_CAP = SHAPE_HISTORY_ROW_CAP;
+
+/*
+ * The browser sends only columns A..J (EXTRACT_COLS). A layout that reads past
+ * that would silently see empty cells — fail at startup instead.
+ */
+{
+  const used = [
+    ...Object.values(WORKBOOK_LAYOUT).flatMap((l) => Object.values(l).filter((v): v is number => typeof v === 'number')),
+    ...Object.values(WORKBOOK_HISTORY).filter((v): v is number => typeof v === 'number'),
+  ];
+  const max = Math.max(...used);
+  if (max >= EXTRACT_COLS) {
+    throw new Error(`importers: workbook layout reads column ${max + 1}, past the extracted ${EXTRACT_COLS}`);
+  }
+}
 
 type Item = Record<string, unknown>;
 
@@ -685,12 +710,7 @@ export function parseHistory(grid: Grid, known: HistoryLookups): HistoryResult {
 /* ------------------------------------------------------------------ entry */
 
 export async function parseImport(type: ImportType, wb: Workbook): Promise<ParseResult> {
-  if (isMasterType(type)) {
-    const L = WORKBOOK_LAYOUT[type];
-    const grid = namedSheetGrid(wb, [...L.sheets]);
-    if (!grid) return { items: [], errors: [], sheetMissing: L.sheets[0] };
-    return MASTER_PARSERS[type](grid);
-  }
+  if (isMasterType(type)) return parseMasterGrid(type, namedSheetGrid(wb, WORKBOOK_LAYOUT[type].sheets));
   const grid = firstSheetGrid(wb);
   switch (type) {
     case 'standard':
