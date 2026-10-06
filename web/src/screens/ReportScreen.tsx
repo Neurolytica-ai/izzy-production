@@ -242,8 +242,9 @@ export function ReportScreen() {
    *    create's own callback, so the row count is the signal, not the callback.
    * Not after an edit or a delete (the count does not grow), and not while the
    * cursor is in an older row: a colleague's row arriving by refetch must not
-   * scroll the row being edited out of view. The all-dates view is newest-first
-   * and is left alone.
+   * scroll the row being edited out of view. The all-dates view is newest-first,
+   * so switching to it starts at the TOP (it would otherwise inherit the day
+   * view's bottom offset and open mid-list).
    */
   const scrollRef = useRef<HTMLDivElement>(null);
   const anchor = useRef<{ view: string | null; count: number }>({ view: null, count: 0 });
@@ -251,6 +252,7 @@ export function ReportScreen() {
   const settled = reports.data != null && !reports.isPlaceholderData;
   useLayoutEffect(() => {
     if (view == null) {
+      if (anchor.current.view !== null && scrollRef.current) scrollRef.current.scrollTop = 0;
       anchor.current = { view: null, count: 0 };
       return;
     }
