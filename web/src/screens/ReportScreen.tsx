@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   api,
   ApiError,
@@ -35,6 +36,12 @@ import { useT } from '../i18n/index.tsx';
  * view still shows each row's date, read-only) — and the day's list stays
  * anchored to its bottom row on load, after a new row and on returning from
  * another tab (#5).
+ *
+ * Client feedback 2026-10-07: a checkbox per row (+ select-all in the header)
+ * and "Duplicate selected (n)" above the table. Each selected row is copied —
+ * date, project/ticket, hours, department — WITHOUT the employee, as a new
+ * editable row; the selection clears. A copy is saved the moment its employee
+ * is filled in (the database requires one), and the originals never change.
  *
  * What changes for a multi-user server: resolution and the over-target rule are
  * the server's job, not the browser's. A create/update sends what the user typed;
@@ -136,6 +143,35 @@ function fromRow(r: ReportRow): GridModel {
   };
 }
 
+/** A duplicated row waiting for its employee (client feedback 2026-10-07). */
+interface CopyModel extends GridModel {
+  key: number;
+  /** Set once its create landed. The copy stays on screen (locked) until the
+   *  refetched list carries the saved row, so the row never blinks out and in. */
+  savedId: number | null;
+}
+
+/** Unsaved copies outlive a trip to another tab (the screen unmounts) — losing
+ *  a batch of duplicated rows to a tab click would be maddening. */
+let copyStore: CopyModel[] = [];
+let nextCopyKey = 1;
+
+/** Everything of the source row except the employee, which the user fills in. */
+function copyOf(r: ReportRow): CopyModel {
+  return {
+    ...fromRow(r),
+    id: null,
+    empText: '',
+    emp_num: null,
+    emp_name: '',
+    key: nextCopyKey++,
+    savedId: null,
+  };
+}
+
+const isComplete = (m: GridModel) =>
+  Boolean(m.empText.trim() && (m.projText.trim() || m.fixText.trim()) && m.hours.trim());
+
 /** Build the create/update payload, sending resolved keys where known and the
  *  typed text otherwise. Undefined keys are omitted so a partial edit never
  *  clears a field it did not touch (and exactOptionalPropertyTypes is satisfied). */
@@ -226,6 +262,125 @@ export function ReportScreen() {
   const [summaryOpen, setSummaryOpen] = useState(false);
 
   const rows = reports.data?.data ?? [];
+  const qc = useQueryClient();
+
+  /* ---- select rows → duplicate without the employee (client feedback 2026-10-07) */
+
+  // A selection belongs to the list it was made on — changing the day or the
+  // view starts clean rather than duplicating rows the user can no longer see.
+  const [selected, setSelected] = useState<Set<number>>(() => new Set());
+  useEffect(() => setSelected(new Set()), [date, showAll]);
+  const selectedRows = rows.filter((r) => selected.has(r.id));
+  const allSelected = rows.length > 0 && selectedRows.length === rows.length;
+  const selAllRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (selAllRef.current) selAllRef.current.indeterminate = selectedRows.length > 0 && !allSelected;
+  });
+  const toggleRow = (id: number) =>
+    setSelected((s) => {
+      const next = new Set(s);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(rows.map((r) => r.id)));
+
+  const [copies, setCopies] = useState<CopyModel[]>(() => copyStore);
+  useEffect(() => {
+    copyStore = copies;
+  }, [copies]);
+  const copiesRef = useRef(copies);
+  copiesRef.current = copies;
+  // A copy keeps its source row's date; the day view lists the copies of its day.
+  const shownCopies = showAll ? copies : copies.filter((c) => c.date === date);
+  const waitingCopies = shownCopies.filter((c) => c.savedId == null);
+
+  const focusCopy = (key: number) => {
+    const input = document.querySelector<HTMLInputElement>(`tr[data-copy="${key}"] [data-grid-input]`);
+    input?.scrollIntoView({ block: 'nearest' });
+    input?.focus();
+  };
+
+  const duplicateSelected = () => {
+    if (selectedRows.length === 0) {
+      toast.show(t('report.dupNone'), 'error');
+      return;
+    }
+    // In the list's own order, so the copies read like the rows they came from.
+    const made = selectedRows.map(copyOf);
+    setCopies((cs) => [...cs, ...made]);
+    setSelected(new Set());
+    toast.show(t('report.dupDone', { n: made.length }));
+    setTimeout(() => focusCopy(made[0]!.key), 30);
+  };
+
+  const discardCopy = (key: number) => setCopies((cs) => cs.filter((c) => c.key !== key || c.savedId != null));
+  const discardShownCopies = () => {
+    const shown = new Set(waitingCopies.map((c) => c.key));
+    setCopies((cs) => cs.filter((c) => !shown.has(c.key)));
+  };
+
+  const copyInFlight = useRef(new Set<number>());
+  // The payload each copy last failed with: an automatic (on-blur) save does not
+  // re-send — and re-toast — the same rejected row until something in it changes.
+  const copyTried = useRef(new Map<number, string>());
+
+  /**
+   * Saves a copy as a new row. `explicit` = Enter at the end of the row (always
+   * tries, and says what is missing); otherwise it is the automatic save when a
+   * cell is left, which only fires once the row is complete — for a fresh copy,
+   * the moment its employee is filled in. The date is the copy's own (the
+   * source row's), not whatever the top date has become since.
+   */
+  const commitCopy = (key: number, explicit: boolean) => {
+    const c = copiesRef.current.find((x) => x.key === key);
+    if (!c || c.savedId != null || copyInFlight.current.has(key)) return;
+    if (!isComplete(c)) {
+      if (explicit) toast.show(t(c.empText.trim() ? 'report.required' : 'report.copy.needEmployee'), 'error');
+      return;
+    }
+    const input = toInput(c);
+    const sig = JSON.stringify(input);
+    if (!explicit && copyTried.current.get(key) === sig) return;
+    copyTried.current.set(key, sig);
+    copyInFlight.current.add(key);
+    let created: ReportRow | undefined;
+    void writeWithOverTarget(
+      async (ack) => {
+        created = await mut.create.mutateAsync({ ...input, acknowledgeOverTarget: ack });
+      },
+      () => {
+        copyInFlight.current.delete(key);
+        copyTried.current.delete(key);
+        toast.show(t('common.added'));
+        // If the user is working in this copy, carry them to the next copy that
+        // still needs an employee — filling a batch is then type, Enter, type…
+        const row = document.querySelector(`tr[data-copy="${key}"]`);
+        const active = document.activeElement;
+        const working = !active || active === document.body || (row != null && row.contains(active));
+        const next = copiesRef.current.find(
+          (x) => x.key !== key && x.savedId == null && !x.empText.trim() && (showAll || x.date === dateRef.current)
+        );
+        setCopies((cs) => cs.map((x) => (x.key === key ? { ...x, savedId: created?.id ?? -1 } : x)));
+        if (working && next) setTimeout(() => focusCopy(next.key), 20);
+        void qc
+          .refetchQueries({ queryKey: ['reports'], type: 'active' })
+          .catch(() => undefined)
+          .finally(() => setCopies((cs) => cs.filter((x) => x.key !== key)));
+      },
+      () => {
+        copyInFlight.current.delete(key);
+      }
+    );
+  };
+
+  const setCopyModel =
+    (key: number): React.Dispatch<React.SetStateAction<GridModel>> =>
+    (action) =>
+      setCopies((cs) =>
+        cs.map((c) =>
+          c.key === key ? { ...c, ...(typeof action === 'function' ? action(c) : action), key, savedId: c.savedId } : c
+        )
+      );
 
   // The status dots (complete/partial/not reported vs the target) were removed:
   // the client wants those colours driven by the attendance clock, which is not
@@ -263,7 +418,7 @@ export function ReportScreen() {
     const el = scrollRef.current;
     if (!el || !(first || grew)) return;
     const active = document.activeElement;
-    if (grew && active && el.contains(active) && !active.closest('tr.draft')) return;
+    if (grew && active && el.contains(active) && !active.closest('tr.draft, tr.copy')) return;
     el.scrollTop = el.scrollHeight;
   }, [view, settled, rows.length]);
 
@@ -446,6 +601,14 @@ export function ReportScreen() {
           >
             {showAll ? t('report.showOneDay') : t('report.allDates')}
           </button>
+          <button
+            className="btn sm"
+            onClick={duplicateSelected}
+            disabled={selectedRows.length === 0}
+            title={selectedRows.length === 0 ? t('report.dupNone') : undefined}
+          >
+            {t('report.dupSelected', { n: selectedRows.length })}
+          </button>
           <div style={{ flex: 1 }} />
           {!showAll && (
             <button className="btn sm ghost" onClick={() => setSummaryOpen(true)}>
@@ -475,6 +638,14 @@ export function ReportScreen() {
               {isSubmitted && <span className="badge-new" style={{ marginInlineStart: 8 }}>{t('report.submitted')}</span>}
             </>
           )}
+          {waitingCopies.length > 0 && (
+            <span style={{ marginInlineStart: 12, color: '#1a56db' }}>
+              ⧉ {t('report.copy.pending', { n: waitingCopies.length })} ·{' '}
+              <button type="button" className="linkish" onClick={discardShownCopies}>
+                {t('report.copy.discardAll')}
+              </button>
+            </span>
+          )}
         </div>
 
         {reports.error ? (
@@ -486,6 +657,18 @@ export function ReportScreen() {
             <table className="xl">
               <thead>
                 <tr>
+                  {/* Selection — first in the DOM, so the far right under RTL */}
+                  <th className="selcell">
+                    <input
+                      ref={selAllRef}
+                      type="checkbox"
+                      checked={allSelected}
+                      disabled={rows.length === 0}
+                      onChange={toggleAll}
+                      aria-label={t('report.sel.all')}
+                      title={t('report.sel.all')}
+                    />
+                  </th>
                   {/* Rows carry no date in the day view — the date at the top
                       is theirs (round 4 #4). The all-dates view mixes days, so
                       there each row's date is shown, read-only. */}
@@ -512,6 +695,8 @@ export function ReportScreen() {
                     mode="existing"
                     seed={r}
                     showDate={showAll}
+                    selected={selected.has(r.id)}
+                    onToggleSelect={toggleRow}
                     onDuplicate={showAll ? undefined : duplicate}
                     onSave={saveExisting}
                     onDelete={(id) =>
@@ -528,6 +713,25 @@ export function ReportScreen() {
                         },
                       })
                     }
+                  />
+                ))}
+
+                {/* Duplicated rows, waiting for an employee — between the saved
+                    rows and the new-entry row, where a saved copy then sits. */}
+                {shownCopies.map((c) => (
+                  <RowEditor
+                    key={`copy-${c.key}`}
+                    mode="draft"
+                    draft={c}
+                    setDraft={setCopyModel(c.key)}
+                    onCommit={() => commitCopy(c.key, true)}
+                    copy={{
+                      key: c.key,
+                      showDate: showAll,
+                      locked: c.savedId != null,
+                      onAutoCommit: () => commitCopy(c.key, false),
+                      onDiscard: () => discardCopy(c.key),
+                    }}
                   />
                 ))}
 
@@ -586,6 +790,9 @@ type RowProps =
       seed: ReportRow;
       /** All-dates view only: the row's own date, read-only. */
       showDate: boolean;
+      /** The row's selection checkbox (client feedback 2026-10-07). */
+      selected: boolean;
+      onToggleSelect: (id: number) => void;
       /** Absent in the all-dates view, which has no new-entry row to copy into. */
       onDuplicate?: ((kind: DuplicateKind, m: GridModel) => void) | undefined;
       onSave: (m: GridModel, onError: () => void) => void;
@@ -596,6 +803,18 @@ type RowProps =
       draft: GridModel;
       setDraft: React.Dispatch<React.SetStateAction<GridModel>>;
       onCommit: () => void;
+      /** Set for a duplicated row: an unsaved row like the new-entry one, that
+       *  saves itself once complete (on leaving a cell) and can be discarded. */
+      copy?:
+        | {
+            key: number;
+            showDate: boolean;
+            /** Saved, waiting for the refetched list to take its place. */
+            locked: boolean;
+            onAutoCommit: () => void;
+            onDiscard: () => void;
+          }
+        | undefined;
     };
 
 /** The small "+" inside a cell. mousedown is swallowed so the click never
@@ -712,6 +931,15 @@ function RowEditor(props: RowProps) {
     if (isDraft) props.onCommit();
   };
 
+  const copy = props.mode === 'draft' ? props.copy : undefined;
+  const locked = copy?.locked ?? false;
+  /** Leaving any cell: an existing row saves its edit, a copy saves once complete. */
+  const leaveCell = () => {
+    reconcile();
+    saveIfExisting();
+    copy?.onAutoCommit();
+  };
+
   const empMiss = model.unresolved.includes('emp');
   const projMiss = model.unresolved.includes('proj');
   const projName = model.proj_name ?? (model.fix != null ? t('report.repairLabel', { n: model.fix }) : '');
@@ -730,13 +958,31 @@ function RowEditor(props: RowProps) {
   // A legacy row that somehow has both stays fully editable so it can be fixed.
   const projFilled = model.projText.trim() !== '';
   const fixFilled = model.fixText.trim() !== '';
-  const projDisabled = fixFilled && !projFilled;
-  const fixDisabled = projFilled && !fixFilled;
+  const projDisabled = locked || (fixFilled && !projFilled);
+  const fixDisabled = locked || (projFilled && !fixFilled);
+
+  const rowClass = copy ? 'copy' : isDraft ? 'draft' : props.selected ? 'sel' : '';
 
   return (
-    <tr className={isDraft ? 'draft' : ''}>
+    <tr className={rowClass} data-copy={copy?.key}>
+      {/* Selection checkbox — not a grid input, so Enter/Tab traversal skips it */}
+      <td className="selcell">
+        {props.mode === 'existing' ? (
+          <input
+            type="checkbox"
+            checked={props.selected}
+            onChange={() => props.onToggleSelect(props.seed.id)}
+            aria-label={t('report.sel.row')}
+          />
+        ) : copy ? (
+          <span className="copy-mark" title={t('report.copy.tag')}>
+            ⧉
+          </span>
+        ) : null}
+      </td>
+
       {/* Date — no cell in the day view (round 4 #4); read-only in all-dates */}
-      {props.mode === 'existing' && props.showDate && (
+      {((props.mode === 'existing' && props.showDate) || copy?.showDate) && (
         <td className="derived" dir="ltr">
           {model.date}
         </td>
@@ -745,15 +991,14 @@ function RowEditor(props: RowProps) {
       {/* Employee (autocomplete) */}
       <AutocompleteCell<Employee>
         value={model.empText}
+        disabled={locked}
         adornment={dupEmp}
         search={empSuggest}
+        {...(copy ? { placeholder: t('report.copy.pickEmployee') } : {})}
         onType={(text) => update({ empText: text, emp_num: null, emp_name: '' })}
         onPick={(e) => update({ empText: e.nick, emp_num: e.num, emp_name: e.name, unresolved: model.unresolved.filter((u) => u !== 'emp') })}
         onEnterEnd={onEnterEnd}
-        onBlur={() => {
-          reconcile();
-          saveIfExisting();
-        }}
+        onBlur={leaveCell}
         ariaLabel={t('aria.employee')}
       />
 
@@ -773,10 +1018,7 @@ function RowEditor(props: RowProps) {
           })
         }
         onEnterEnd={onEnterEnd}
-        onBlur={() => {
-          reconcile();
-          saveIfExisting();
-        }}
+        onBlur={leaveCell}
         ariaLabel={t('aria.project')}
       />
 
@@ -804,10 +1046,7 @@ function RowEditor(props: RowProps) {
           })
         }
         onEnterEnd={onEnterEnd}
-        onBlur={() => {
-          reconcile();
-          saveIfExisting();
-        }}
+        onBlur={leaveCell}
         ariaLabel={t('aria.repairNo')}
       />
 
@@ -819,8 +1058,12 @@ function RowEditor(props: RowProps) {
           step={0.5}
           min={0}
           value={model.hours}
+          disabled={locked}
           onChange={(e) => update({ hours: e.target.value })}
-          onBlur={saveIfExisting}
+          onBlur={() => {
+            saveIfExisting();
+            copy?.onAutoCommit();
+          }}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
               e.preventDefault();
@@ -837,14 +1080,12 @@ function RowEditor(props: RowProps) {
       {/* Department (autocomplete) */}
       <AutocompleteCell<Department & { bucket_label: string | null }>
         value={model.deptText}
+        disabled={locked}
         search={deptSuggest}
         onType={(text) => update({ deptText: text, dept_num: null })}
         onPick={(d) => update({ deptText: d.name, dept_num: d.num })}
         onEnterEnd={onEnterEnd}
-        onBlur={() => {
-          reconcile();
-          saveIfExisting();
-        }}
+        onBlur={leaveCell}
         ariaLabel={t('aria.department')}
       />
 
@@ -870,6 +1111,11 @@ function RowEditor(props: RowProps) {
             onClick={() => (props as Extract<RowProps, { mode: 'existing' }>).onDelete(props.seed.id)}
           >
             🗑
+          </button>
+        )}
+        {copy && !locked && (
+          <button className="delx" title={t('report.copy.remove')} aria-label={t('report.copy.remove')} onClick={copy.onDiscard}>
+            ✕
           </button>
         )}
       </td>

@@ -274,6 +274,27 @@ export const STRINGS = {
     en: 'New row with this project/ticket and department',
     he: 'שורה חדשה עם אותו פרויקט/תיקון ומחלקה',
   },
+  // Select rows → duplicate without the employee (client feedback 2026-10-07)
+  'report.sel.all': { en: 'Select all rows', he: 'סמן את כל השורות' },
+  'report.sel.row': { en: 'Select row', he: 'סמן שורה' },
+  'report.dupSelected': { en: '⧉ Duplicate selected ({n})', he: '⧉ שכפל נבחרות ({n})' },
+  'report.dupNone': { en: 'Select the rows to duplicate first', he: 'יש לסמן שורות לשכפול' },
+  'report.dupDone': {
+    en: '{n} rows duplicated — fill in the employee',
+    he: 'שוכפלו {n} שורות — יש למלא עובד',
+  },
+  'report.copy.pending': {
+    en: '{n} duplicated rows waiting for an employee — a row is saved once its employee is filled in',
+    he: '{n} שורות משוכפלות ממתינות לעובד — שורה נשמרת ברגע שממלאים בה עובד',
+  },
+  'report.copy.discardAll': { en: 'Discard them', he: 'בטל אותן' },
+  'report.copy.tag': { en: 'Duplicated row — not saved yet', he: 'שורה משוכפלת — טרם נשמרה' },
+  'report.copy.remove': { en: 'Remove this duplicated row', he: 'הסר שורה משוכפלת' },
+  'report.copy.pickEmployee': { en: 'Employee…', he: 'עובד…' },
+  'report.copy.needEmployee': {
+    en: 'Fill in the employee to save this row',
+    he: 'יש למלא עובד כדי לשמור את השורה',
+  },
   'report.summary.button': { en: '📊 Hours summary', he: '📊 סיכום שעות' },
   'report.summary.title': { en: 'Hours summary — {date}', he: 'סיכום שעות — {date}' },
   'report.summary.close': { en: 'Close', he: 'סגור' },
@@ -389,29 +410,6 @@ export const STRINGS = {
     he: 'תוקף הטעינה הממתינה פג — יש לטעון את הקובץ מחדש.',
   },
 
-  // New hours rows + duplication in the review (client feedback round 4 #3)
-  'import.rows.title': { en: 'New hours rows ({n})', he: 'שורות שעות חדשות ({n})' },
-  'import.rows.truncated': {
-    en: 'Showing the newest {shown} of {n}.',
-    he: 'מוצגות {shown} השורות האחרונות מתוך {n}.',
-  },
-  'import.rows.hint': {
-    en: 'Select rows and duplicate them — a copy keeps everything except the employee, which you fill in.',
-    he: 'יש לסמן שורות ולשכפל אותן — העותק שומר הכל מלבד העובד, אותו יש למלא.',
-  },
-  'import.rows.filter': { en: 'Filter rows…', he: 'סינון שורות…' },
-  'import.rows.duplicate': { en: '⧉ Duplicate selected ({n})', he: '⧉ שכפל נבחרות ({n})' },
-  'import.rows.selectAll': { en: 'Select all shown rows', he: 'סמן את כל השורות המוצגות' },
-  'import.rows.select': { en: 'Select row', he: 'סמן שורה' },
-  'import.rows.copy': { en: 'copy', he: 'עותק' },
-  'import.rows.remove': { en: 'Remove this duplicated row', he: 'הסר שורה משוכפלת' },
-  'import.rows.pickEmployee': { en: 'Employee…', he: 'עובד…' },
-  'import.rows.needEmployee': {
-    en: '{n} duplicated rows still need an employee',
-    he: '{n} שורות משוכפלות עדיין ללא עובד',
-  },
-  'import.rows.none': { en: 'No new hours rows in this file.', he: 'אין שורות שעות חדשות בקובץ.' },
-  'import.review.dup': { en: ' · {n} duplicated rows', he: ' · {n} שורות משוכפלות' },
   'import.review.intro': {
     en: 'Review the changes below. Nothing is saved until you confirm.',
     he: 'יש לעבור על השינויים שלהלן. דבר לא נשמר עד לאישור.',

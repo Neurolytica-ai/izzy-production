@@ -1,14 +1,11 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   api,
   ApiError,
   type DraftChoices,
-  type DuplicatedRow,
-  type Employee,
   type ImportChange,
   type ImportDraft,
-  type ImportNewRow,
   type ImportPreview,
   type RemovableType,
   type Role,
@@ -17,7 +14,6 @@ import {
   type WorkbookSection,
 } from '../api/client.ts';
 import { keys, useImportDraft } from '../api/hooks.ts';
-import { AutocompleteCell, type AcSuggestion } from '../components/AutocompleteCell.tsx';
 import { ConfirmDialog } from '../components/Modal.tsx';
 import { useToast } from '../components/Toast.tsx';
 import { useT } from '../i18n/index.tsx';
@@ -42,10 +38,10 @@ import { cancelImport, clearImportError, startImport, useImportJob } from '../li
  *   #1 the browser reads the 34 MB workbook itself and uploads ~2 MB (lib/importJob);
  *   #2 the uploaded, unapproved review is kept ON THE SERVER (one per user) — it
  *      survives switching tabs and refreshing until approved, cancelled, or
- *      expired; the user's ticks and duplicated rows are saved with it. "Cancel
- *      this upload" discards it so another file can be uploaded;
- *   #3 the new hours rows are listed, and any of them can be duplicated: the copy
- *      keeps everything but the employee, which the user fills in.
+ *      expired; the user's ticks are saved with it. "Cancel this upload"
+ *      discards it so another file can be uploaded.
+ * (Round 4 #3, duplicating rows, briefly lived here — it belongs to the hours
+ * grid and moved there on 2026-10-07.)
  * Approval re-checks the stored upload against the database (server side), so
  * what is applied is current even if the data changed while it waited.
  */
@@ -101,14 +97,13 @@ const NO_CHOICES: DraftChoices = { remove: {}, added: [] };
 function normalize(c: Partial<DraftChoices> | undefined): DraftChoices {
   return {
     remove: c?.remove ?? {},
-    added: (c?.added ?? []).map((a) => ({ id: a.id, src: a.src, emp: a.emp ?? null, label: a.label ?? '' })),
+    // Duplicating rows moved to the hours grid (client feedback 2026-10-07 — it
+    // was never meant for the upload review). A pending upload saved before
+    // that still carries copies; dropped here, and approval always sends the
+    // local choices, so they are never applied unseen.
+    added: [],
   };
 }
-
-const newId = () =>
-  typeof crypto !== 'undefined' && 'randomUUID' in crypto
-    ? crypto.randomUUID()
-    : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
 
 const hhmm = (iso: string) => new Date(iso).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
 
@@ -247,11 +242,6 @@ export function ImportScreen({ role }: { role: Role }) {
   const setAll = (type: RemovableType, all: number[], on: boolean) =>
     change((c) => ({ ...c, remove: { ...c.remove, [type]: on ? all : [] } }));
 
-  const duplicate = (srcRows: number[]) =>
-    change((c) => ({ ...c, added: [...c.added, ...srcRows.map((src) => ({ id: newId(), src, emp: null, label: '' }))] }));
-  const setDupEmployee = (id: string, emp: number | null, label: string) =>
-    change((c) => ({ ...c, added: c.added.map((a) => (a.id === id ? { ...a, emp, label } : a)) }));
-  const removeDup = (id: string) => change((c) => ({ ...c, added: c.added.filter((a) => a.id !== id) }));
 
   /* ---- derived */
 
@@ -270,10 +260,7 @@ export function ImportScreen({ role }: { role: Role }) {
   const removeCount = REMOVABLE.reduce((n, type) => n + selected[type].size, 0);
   const adds = preview?.counts.new ?? 0;
   const updates = preview?.counts.updated ?? 0;
-  const dupCount = choices.added.length;
-  const missingEmp = choices.added.filter((a) => a.emp == null).length;
-  const canCommit = adds + updates + removeCount + dupCount > 0 && missingEmp === 0;
-  const dupSuffix = dupCount > 0 ? t('import.review.dup', { n: dupCount }) : '';
+  const canCommit = adds + updates + removeCount > 0;
 
   return (
     <div className="card">
@@ -351,24 +338,10 @@ export function ImportScreen({ role }: { role: Role }) {
                 />
               ))}
 
-              <NewRowsReview
-                rows={preview.newRows ?? []}
-                total={preview.newRowsTotal ?? 0}
-                added={choices.added}
-                onDuplicate={duplicate}
-                onSetEmployee={setDupEmployee}
-                onRemove={removeDup}
-              />
 
               <div className="imp-summary">
                 {t('import.review.summary', { add: adds, upd: updates, rem: removeCount })}
-                {dupSuffix}
               </div>
-              {missingEmp > 0 && (
-                <div className="mini" style={{ color: '#c33', marginBottom: 8 }}>
-                  {t('import.rows.needEmployee', { n: missingEmp })}
-                </div>
-              )}
               <button className="btn grn sm" onClick={() => setConfirming('commit')} disabled={busy || !canCommit}>
                 {busy ? t('common.working') : t('import.confirm')}
               </button>{' '}
@@ -393,7 +366,7 @@ export function ImportScreen({ role }: { role: Role }) {
 
       {confirming === 'commit' && (
         <ConfirmDialog
-          message={t('import.review.confirm', { add: adds, upd: updates, rem: removeCount }) + dupSuffix}
+          message={t('import.review.confirm', { add: adds, upd: updates, rem: removeCount })}
           confirmLabel={t('import.confirm')}
           onConfirm={() => void commit()}
           onCancel={() => setConfirming(null)}
@@ -422,191 +395,6 @@ function Elapsed({ since }: { since: number }) {
   }, []);
   const s = Math.max(0, Math.round((now - since) / 1000));
   return <span style={{ color: 'var(--muted)' }}>({t('import.elapsed', { s })})</span>;
-}
-
-/* ------------------------------------------- new hours rows (round 4 #3) */
-
-const empSuggest = (q: string): Promise<AcSuggestion<Employee>[]> =>
-  api.lookup.employees(q).then((rows) =>
-    rows.map((e) => ({ main: e.nick, sub: `${e.name} · ${e.num}`, value: e }))
-  );
-
-/**
- * The upload's new hours rows, newest first. Selected rows can be duplicated:
- * each copy appears right under its source row with the employee empty, to be
- * filled in with the same autocomplete as the hours grid. A copy can be removed
- * again; approval is blocked until every copy has an employee.
- */
-function NewRowsReview({
-  rows,
-  total,
-  added,
-  onDuplicate,
-  onSetEmployee,
-  onRemove,
-}: {
-  rows: ImportNewRow[];
-  total: number;
-  added: DuplicatedRow[];
-  onDuplicate: (srcRows: number[]) => void;
-  onSetEmployee: (id: string, emp: number | null, label: string) => void;
-  onRemove: (id: string) => void;
-}) {
-  const t = useT();
-  const [filter, setFilter] = useState('');
-  const [selected, setSelected] = useState<Set<number>>(() => new Set());
-
-  const shown = useMemo(() => {
-    const q = filter.trim();
-    if (!q) return rows;
-    return rows.filter((r) =>
-      [r.date, r.emp_nick, r.emp_name, r.proj_name, r.proj_num, r.fix, r.dept, r.hours].some(
-        (v) => v != null && String(v).includes(q)
-      )
-    );
-  }, [rows, filter]);
-
-  const copiesOf = useMemo(() => {
-    const m = new Map<number, DuplicatedRow[]>();
-    for (const a of added) m.set(a.src, [...(m.get(a.src) ?? []), a]);
-    return m;
-  }, [added]);
-
-  const allShown = shown.length > 0 && shown.every((r) => selected.has(r.row));
-  const setShown = (on: boolean) =>
-    setSelected((s) => {
-      const next = new Set(s);
-      for (const r of shown) {
-        if (on) next.add(r.row);
-        else next.delete(r.row);
-      }
-      return next;
-    });
-  const toggle = (row: number, on: boolean) =>
-    setSelected((s) => {
-      const next = new Set(s);
-      if (on) next.add(row);
-      else next.delete(row);
-      return next;
-    });
-
-  const duplicateSelected = () => {
-    // In the order shown, so the copies line up with what the user ticked.
-    onDuplicate(rows.filter((r) => selected.has(r.row)).map((r) => r.row));
-    setSelected(new Set());
-    // Straight to the first copy's employee cell.
-    setTimeout(() => {
-      document.querySelector<HTMLInputElement>('tr.imp-dup.missing [data-grid-input]')?.focus();
-    }, 50);
-  };
-
-  const projLabel = (r: ImportNewRow) =>
-    r.fix != null ? t('report.repairLabel', { n: r.fix }) : r.proj_name ?? String(r.proj_num ?? '');
-
-  return (
-    <div className="imp-section">
-      <div className="t">{t('import.rows.title', { n: total })}</div>
-      {rows.length === 0 ? (
-        <div className="mini">{t('import.rows.none')}</div>
-      ) : (
-        <>
-          <div className="mini">
-            {t('import.rows.hint')}
-            {total > rows.length ? ` ${t('import.rows.truncated', { shown: rows.length, n: total })}` : ''}
-          </div>
-          <div className="toolbar" style={{ margin: '6px 0' }}>
-            <input
-              type="search"
-              placeholder={t('import.rows.filter')}
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-            />
-            <button className="btn sm" disabled={selected.size === 0} onClick={duplicateSelected}>
-              {t('import.rows.duplicate', { n: selected.size })}
-            </button>
-          </div>
-          <div className="xl-scroll imp-rows-scroll">
-            <table className="xl imp-rows">
-              <thead>
-                <tr>
-                  <th style={{ width: 44 }}>
-                    <input
-                      type="checkbox"
-                      aria-label={t('import.rows.selectAll')}
-                      checked={allShown}
-                      onChange={(e) => setShown(e.target.checked)}
-                    />
-                  </th>
-                  <th>{t('report.th.date')}</th>
-                  <th style={{ minWidth: 130 }}>{t('report.th.employee')}</th>
-                  <th>{t('report.th.project')}</th>
-                  <th>{t('report.th.department')}</th>
-                  <th>{t('report.th.hours')}</th>
-                  <th style={{ width: 34 }} />
-                </tr>
-              </thead>
-              <tbody>
-                {shown.map((r) => (
-                  <Fragment key={r.row}>
-                    <tr className={selected.has(r.row) ? 'sel' : ''}>
-                      <td className="actcell">
-                        <input
-                          type="checkbox"
-                          aria-label={t('import.rows.select')}
-                          checked={selected.has(r.row)}
-                          onChange={(e) => toggle(r.row, e.target.checked)}
-                        />
-                      </td>
-                      <td className="derived" dir="ltr">
-                        {r.date}
-                      </td>
-                      <td className="derived" title={r.emp_name}>
-                        {r.emp_nick}
-                      </td>
-                      <td className="derived" title={projLabel(r)}>
-                        {projLabel(r)}
-                      </td>
-                      <td className="derived">{r.dept ?? ''}</td>
-                      <td className="derived">{r.hours}</td>
-                      <td className="actcell" />
-                    </tr>
-                    {(copiesOf.get(r.row) ?? []).map((d) => (
-                      <tr key={d.id} className={`imp-dup${d.emp == null ? ' missing' : ''}`}>
-                        <td className="actcell">
-                          <span className="badge-new">{t('import.rows.copy')}</span>
-                        </td>
-                        <td className="derived" dir="ltr">
-                          {r.date}
-                        </td>
-                        <AutocompleteCell<Employee>
-                          value={d.label}
-                          placeholder={t('import.rows.pickEmployee')}
-                          search={empSuggest}
-                          onType={(text) => onSetEmployee(d.id, null, text)}
-                          onPick={(e) => onSetEmployee(d.id, e.num, e.nick)}
-                          ariaLabel={t('aria.employee')}
-                        />
-                        <td className="derived" title={projLabel(r)}>
-                          {projLabel(r)}
-                        </td>
-                        <td className="derived">{r.dept ?? ''}</td>
-                        <td className="derived">{r.hours}</td>
-                        <td className="actcell">
-                          <button className="delx" title={t('import.rows.remove')} onClick={() => onRemove(d.id)}>
-                            ✕
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </Fragment>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </>
-      )}
-    </div>
-  );
 }
 
 /* ------------------------------------------------------------ one list */
