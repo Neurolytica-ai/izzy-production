@@ -295,6 +295,11 @@ export const STRINGS = {
     en: 'Fill in the employee to save this row',
     he: 'יש למלא עובד כדי לשמור את השורה',
   },
+  'report.copy.pickDept': { en: 'Department…', he: 'מחלקה…' },
+  'report.copy.needDept': {
+    en: 'Fill in the department to save this row',
+    he: 'יש למלא מחלקה כדי לשמור את השורה',
+  },
   'report.summary.button': { en: '📊 Hours summary', he: '📊 סיכום שעות' },
   'report.summary.title': { en: 'Hours summary — {date}', he: 'סיכום שעות — {date}' },
   'report.summary.close': { en: 'Close', he: 'סגור' },

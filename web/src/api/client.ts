@@ -263,7 +263,8 @@ export interface ReportRow {
   fix: number | null;
   display_proj_name: string | null;
   repair_client: string | null;
-  dept: string;
+  /** NULL on the 18k pre-2020 history rows imported without a department. */
+  dept: string | null;
   dept_num: number | null;
   bucket: string | null;
   hours: number | string;

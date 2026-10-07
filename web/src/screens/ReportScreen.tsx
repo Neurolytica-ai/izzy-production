@@ -17,6 +17,7 @@ import { ConfirmDialog } from '../components/Modal.tsx';
 import { HoursSummary } from '../components/HoursSummary.tsx';
 import { useToast } from '../components/Toast.tsx';
 import { useT } from '../i18n/index.tsx';
+import type { StringKey } from '../i18n/strings.ts';
 
 /**
  * WP §6, §7.3 — the Excel-style hours-entry grid, the system's most-used screen
@@ -41,7 +42,8 @@ import { useT } from '../i18n/index.tsx';
  * and "Duplicate selected (n)" above the table. Each selected row is copied —
  * date, project/ticket, hours, department — WITHOUT the employee, as a new
  * editable row; the selection clears. A copy is saved the moment its employee
- * is filled in (the database requires one), and the originals never change.
+ * is identified — picked from the list, or a typed name the server confirms
+ * (the database requires one) — and the originals never change.
  *
  * What changes for a multi-user server: resolution and the over-target rule are
  * the server's job, not the browser's. A create/update sends what the user typed;
@@ -135,7 +137,9 @@ function fromRow(r: ReportRow): GridModel {
     // row names its customer like a project row does (client feedback #6).
     proj_name: r.display_proj_name || r.proj_name,
     hours: String(r.hours),
-    deptText: r.dept,
+    // Old history rows (pre-2020) were imported without a department; a NULL
+    // here used to crash the whole grid on any such day (toInput trims it).
+    deptText: r.dept ?? '',
     dept_num: r.dept_num,
     fixText: r.fix == null ? '' : String(r.fix),
     fix: r.fix,
@@ -169,8 +173,22 @@ function copyOf(r: ReportRow): CopyModel {
   };
 }
 
-const isComplete = (m: GridModel) =>
-  Boolean(m.empText.trim() && (m.projText.trim() || m.fixText.trim()) && m.hours.trim());
+/** What the user typed in a row's four text cells — identifies which text a
+ *  resolve answer belongs to. */
+const typedKey = (m: GridModel) =>
+  [m.empText, m.projText, m.deptText, m.fixText].map((s) => s.trim()).join('\u0001');
+
+/** A copy can be saved once it has everything the server requires — which
+ *  includes a department: a copy of an old history row without one waits for
+ *  it rather than failing with a generic "invalid input". */
+const copyMissing = (m: GridModel): StringKey | null =>
+  !m.empText.trim()
+    ? 'report.copy.needEmployee'
+    : !(m.projText.trim() || m.fixText.trim()) || !m.hours.trim()
+      ? 'report.required'
+      : !m.deptText.trim()
+        ? 'report.copy.needDept'
+        : null;
 
 /** Build the create/update payload, sending resolved keys where known and the
  *  typed text otherwise. Undefined keys are omitted so a partial edit never
@@ -319,6 +337,11 @@ export function ReportScreen() {
     setCopies((cs) => cs.filter((c) => !shown.has(c.key)));
   };
 
+  // Copies being saved — or already saved. A key leaves only when its save did
+  // NOT persist (error / declined over-target), so it can be retried. On
+  // success it stays: the "saved" mark reaches copiesRef only on the next
+  // render, and a late resolve answer landing in between would otherwise send
+  // the same copy a second time (seen in the regression run: two identical rows).
   const copyInFlight = useRef(new Set<number>());
   // The payload each copy last failed with: an automatic (on-blur) save does not
   // re-send — and re-toast — the same rejected row until something in it changes.
@@ -327,15 +350,24 @@ export function ReportScreen() {
   /**
    * Saves a copy as a new row. `explicit` = Enter at the end of the row (always
    * tries, and says what is missing); otherwise it is the automatic save when a
-   * cell is left, which only fires once the row is complete — for a fresh copy,
-   * the moment its employee is filled in. The date is the copy's own (the
-   * source row's), not whatever the top date has become since.
+   * cell is left (or a typed name resolves), which only fires once the employee
+   * is identified and the row is complete — for a fresh copy, the moment its
+   * employee is picked. The date is the copy's own (the source row's), not
+   * whatever the top date has become since.
    */
-  const commitCopy = (key: number, explicit: boolean) => {
-    const c = copiesRef.current.find((x) => x.key === key);
-    if (!c || c.savedId != null || copyInFlight.current.has(key)) return;
-    if (!isComplete(c)) {
-      if (explicit) toast.show(t(c.empText.trim() ? 'report.required' : 'report.copy.needEmployee'), 'error');
+  const commitCopy = (key: number, explicit: boolean, patch?: Partial<GridModel>) => {
+    const found = copiesRef.current.find((x) => x.key === key);
+    if (!found || found.savedId != null || copyInFlight.current.has(key)) return;
+    // `patch` = a resolve answer that has not rendered yet (see reconcile).
+    const c = patch ? { ...found, ...patch } : found;
+    // Saved automatically only once the employee is IDENTIFIED — picked from
+    // the list, or a typed name the server confirmed — never on text still
+    // being typed (a cell's blur handler runs 150 ms late). Enter at the end of
+    // the row still sends what is typed and lets the server resolve it.
+    if (!explicit && c.emp_num == null) return;
+    const missing = copyMissing(c);
+    if (missing) {
+      if (explicit) toast.show(t(missing), 'error');
       return;
     }
     const input = toInput(c);
@@ -349,7 +381,7 @@ export function ReportScreen() {
         created = await mut.create.mutateAsync({ ...input, acknowledgeOverTarget: ack });
       },
       () => {
-        copyInFlight.current.delete(key);
+        // copyInFlight keeps the key — this copy is done (see above).
         copyTried.current.delete(key);
         toast.show(t('common.added'));
         // If the user is working in this copy, carry them to the next copy that
@@ -729,7 +761,7 @@ export function ReportScreen() {
                       key: c.key,
                       showDate: showAll,
                       locked: c.savedId != null,
-                      onAutoCommit: () => commitCopy(c.key, false),
+                      onAutoCommit: (patch) => commitCopy(c.key, false, patch),
                       onDiscard: () => discardCopy(c.key),
                     }}
                   />
@@ -811,7 +843,8 @@ type RowProps =
             showDate: boolean;
             /** Saved, waiting for the refetched list to take its place. */
             locked: boolean;
-            onAutoCommit: () => void;
+            /** `patch`: a resolve answer not rendered yet. */
+            onAutoCommit: (patch?: Partial<GridModel>) => void;
             onDiscard: () => void;
           }
         | undefined;
@@ -882,12 +915,19 @@ function RowEditor(props: RowProps) {
   const modelRef = useRef(model);
   modelRef.current = model;
 
+  const copy = props.mode === 'draft' ? props.copy : undefined;
+
   /** Reconcile the derived columns for whatever the user typed but did not pick
    *  (e.g. Tab-out of an exact nickname). Uses the same server resolver the save
    *  will use, so the preview cannot disagree with what gets stored. */
   const reconcile = () => {
     const m = modelRef.current;
     if (!m.empText.trim() && !m.projText.trim() && !m.deptText.trim() && !m.fixText.trim()) return;
+    // The answer is for the text as it is NOW. A blur's handler runs 150 ms
+    // late and the request takes a round trip, so the user may have typed on by
+    // the time it lands — an answer for older text must not attach, say, the
+    // employee of a half-typed name to the row. Stale answers are dropped.
+    const asked = typedKey(m);
     void api.lookup
       .resolve({
         emp: m.empText.trim() || (m.emp_num != null ? String(m.emp_num) : null),
@@ -896,7 +936,8 @@ function RowEditor(props: RowProps) {
         fix: m.fixText.trim() || (m.fix != null ? String(m.fix) : null),
       })
       .then((res) => {
-        update({
+        if (typedKey(modelRef.current) !== asked) return;
+        const patch: Partial<GridModel> = {
           emp_num: res.employee?.emp_num ?? null,
           emp_name: res.employee?.emp_name ?? '',
           proj_num: res.project?.proj_num ?? null,
@@ -906,7 +947,11 @@ function RowEditor(props: RowProps) {
           dept_num: res.department?.dept_num ?? null,
           fix: res.repair?.fix ?? null,
           unresolved: res.unresolved,
-        });
+        };
+        update(patch);
+        // A copy whose employee was typed in full rather than picked is saved
+        // once the server has identified that employee.
+        copy?.onAutoCommit(patch);
       })
       .catch(() => {
         /* a resolution preview failure is not worth interrupting entry over */
@@ -931,7 +976,6 @@ function RowEditor(props: RowProps) {
     if (isDraft) props.onCommit();
   };
 
-  const copy = props.mode === 'draft' ? props.copy : undefined;
   const locked = copy?.locked ?? false;
   /** Leaving any cell: an existing row saves its edit, a copy saves once complete. */
   const leaveCell = () => {
@@ -1081,6 +1125,7 @@ function RowEditor(props: RowProps) {
       <AutocompleteCell<Department & { bucket_label: string | null }>
         value={model.deptText}
         disabled={locked}
+        {...(copy ? { placeholder: t('report.copy.pickDept') } : {})}
         search={deptSuggest}
         onType={(text) => update({ deptText: text, dept_num: null })}
         onPick={(d) => update({ deptText: d.name, dept_num: d.num })}
