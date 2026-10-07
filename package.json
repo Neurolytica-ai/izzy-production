@@ -1,6 +1,6 @@
 {
   "name": "izy-production",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "private": true,
   "description": "Izzy Yogev Technologies — Production Management & Control System",
   "type": "module",
